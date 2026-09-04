@@ -8,9 +8,7 @@
     <uses-permission android:name="android.permission.WAKE_LOCK"/>
 
     <queries>
-        <intent>
-            <action android:name="android.speech.RecognitionService"/>
-        </intent>
+        <intent><action android:name="android.speech.RecognitionService"/></intent>
     </queries>
 
     <application
@@ -19,9 +17,11 @@
         android:theme="@style/Theme.RadikoTranscriber"
         android:usesCleartextTraffic="false">
 
-        <activity
-            android:name=".MainActivity"
-            android:exported="true">
+        <activity android:name=".EpisodeDetailActivity" android:exported="false"/>
+        <activity android:name=".DictionaryActivity" android:exported="false"/>
+        <activity android:name=".ProgramActivity" android:exported="false"/>
+
+        <activity android:name=".MainActivity" android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN"/>
                 <category android:name="android.intent.category.LAUNCHER"/>
