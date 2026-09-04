@@ -1,327 +1,67 @@
 <?xml version="1.0" encoding="utf-8"?>
 <ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
-    android:layout_width="match_parent"
-    android:layout_height="match_parent"
-    android:background="#F4F5F7"
-    android:fillViewport="true">
+    android:layout_width="match_parent" android:layout_height="match_parent"
+    android:background="#F4F5F7" android:fillViewport="true">
+    <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical" android:padding="16dp">
 
-    <LinearLayout
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:orientation="vertical"
-        android:padding="16dp">
+        <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:text="ラジオ文字起こし" android:textColor="#111827" android:textSize="25sp" android:textStyle="bold"/>
+        <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="3dp" android:text="v0.11  •  タイムスタンプ / 番組辞書 / バックアップ / CSV / 番組まとめ" android:textColor="#6B7280" android:textSize="12sp"/>
 
-        <TextView
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="ラジオ文字起こし"
-            android:textColor="#111827"
-            android:textSize="25sp"
-            android:textStyle="bold"/>
-
-        <TextView
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="3dp"
-            android:text="v0.10  •  自動保存 / 番組別補正 / 検索 / 分析用書き出し"
-            android:textColor="#6B7280"
-            android:textSize="12sp"/>
-
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="16dp"
-            android:background="@drawable/panel"
-            android:orientation="vertical">
-
-            <TextView
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:text="1. この回を登録"
-                android:textColor="#111827"
-                android:textSize="18sp"
-                android:textStyle="bold"/>
-
-            <EditText
-                android:id="@+id/programInput"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="10dp"
-                android:hint="番組名  例：≠ME 永田詩央里のけれけれ"
-                android:inputType="text"
-                android:singleLine="true"/>
-
-            <EditText
-                android:id="@+id/episodeInput"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="4dp"
-                android:hint="回の名前  例：2026/09/04 第○回"
-                android:inputType="text"
-                android:singleLine="true"/>
-
-            <EditText
-                android:id="@+id/urlInput"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="4dp"
-                android:hint="radiko Podcast URL"
-                android:inputType="textUri"
-                android:singleLine="true"/>
-
-            <TextView
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="10dp"
-                android:text="radiko側の再生速度"
-                android:textColor="#6B7280"
-                android:textSize="12sp"/>
-
-            <Spinner
-                android:id="@+id/playbackSpeedSpinner"
-                android:layout_width="match_parent"
-                android:layout_height="48dp"/>
-
-            <TextView
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:text="1.5x / 2.0xでは認識区間を短くし、候補比較と番組別の固有名詞補正を強めます。精度優先なら1.0xがおすすめです。"
-                android:textColor="#6B7280"
-                android:textSize="11sp"/>
-
-            <CheckBox
-                android:id="@+id/autoStopCheck"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="6dp"
-                android:checked="true"
-                android:text="再生終了を無音で検知して自動停止・保存（約18秒）"
-                android:textColor="#374151"
-                android:textSize="13sp"/>
-
-            <Button
-                android:id="@+id/startButton"
-                android:layout_width="match_parent"
-                android:layout_height="56dp"
-                android:layout_marginTop="10dp"
-                android:text="2. 文字起こしを開始してブラウザを開く"
-                android:textSize="15sp"
-                android:textStyle="bold"/>
-
-            <Button
-                android:id="@+id/openBrowserButton"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="5dp"
-                android:text="ブラウザだけ開く"/>
-
-            <Button
-                android:id="@+id/micStartButton"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="5dp"
-                android:text="内部音声が取れないとき：マイク経由で開始"/>
-
-            <Button
-                android:id="@+id/newEpisodeButton"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="5dp"
-                android:text="＋ 次の回を入力する（番組名は引き継ぐ）"/>
+        <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="14dp" android:background="@drawable/panel" android:orientation="vertical">
+            <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:text="新しい回を文字起こし" android:textColor="#111827" android:textSize="18sp" android:textStyle="bold"/>
+            <EditText android:id="@+id/programInput" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="8dp" android:hint="番組名  例：≠ME 永田詩央里のけれけれ" android:singleLine="true"/>
+            <EditText android:id="@+id/episodeInput" android:layout_width="match_parent" android:layout_height="wrap_content" android:hint="回の名前  例：2026/09/04 第○回" android:singleLine="true"/>
+            <EditText android:id="@+id/urlInput" android:layout_width="match_parent" android:layout_height="wrap_content" android:hint="radiko Podcast URL" android:inputType="textUri" android:singleLine="true"/>
+            <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="8dp" android:text="radiko側の再生速度" android:textColor="#6B7280" android:textSize="12sp"/>
+            <Spinner android:id="@+id/playbackSpeedSpinner" android:layout_width="match_parent" android:layout_height="48dp"/>
+            <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:text="1.5x / 2.0xでは入力音声を認識用に引き伸ばす補助と、短い認識区間・候補比較・固有名詞辞書を併用します。" android:textColor="#6B7280" android:textSize="11sp"/>
+            <CheckBox android:id="@+id/autoStopCheck" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="5dp" android:checked="true" android:text="再生終了を判定して自動停止・保存（無音＋文字更新停止を確認）" android:textSize="13sp"/>
+            <Button android:id="@+id/startButton" android:layout_width="match_parent" android:layout_height="56dp" android:layout_marginTop="8dp" android:text="文字起こし開始 → ブラウザを開く" android:textStyle="bold" android:textSize="15sp"/>
+            <Button android:id="@+id/openBrowserButton" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="ブラウザだけ開く"/>
+            <Button android:id="@+id/micStartButton" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="内部音声が取れないとき：マイク経由"/>
+            <Button android:id="@+id/newEpisodeButton" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="＋ 次の回を入力（番組名は引き継ぐ）"/>
         </LinearLayout>
 
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="12dp"
-            android:background="@drawable/panel"
-            android:orientation="vertical">
-
-            <TextView
-                android:id="@+id/currentEpisodeLabel"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:text="新しい回"
-                android:textColor="#111827"
-                android:textSize="16sp"
-                android:textStyle="bold"/>
-
-            <TextView
-                android:id="@+id/status"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="8dp"
-                android:background="#F3F4F6"
-                android:padding="12dp"
-                android:text="待機中"
-                android:textColor="#111827"
-                android:textSize="14sp"/>
-
-            <TextView
-                android:id="@+id/meter"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="7dp"
-                android:text="待機中"
-                android:textColor="#0F766E"
-                android:textSize="12sp"/>
-
-            <TextView
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="6dp"
-                android:text="開始後はブラウザや他アプリを開いてもバックグラウンドで継続します。再生終了を検知すると自動で停止・保存します。"
-                android:textColor="#6B7280"
-                android:textSize="12sp"/>
-
-            <Button
-                android:id="@+id/stopButton"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="9dp"
-                android:enabled="false"
-                android:text="今すぐ停止して保存"/>
+        <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="12dp" android:background="@drawable/panel" android:orientation="vertical">
+            <TextView android:id="@+id/currentEpisodeLabel" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="新しい回" android:textSize="16sp" android:textStyle="bold"/>
+            <TextView android:id="@+id/status" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="7dp" android:background="#F3F4F6" android:padding="12dp" android:text="待機中" android:textSize="14sp"/>
+            <TextView android:id="@+id/meter" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="6dp" android:text="待機中" android:textColor="#0F766E" android:textSize="12sp"/>
+            <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="5dp" android:text="開始後はブラウザや他アプリを開いてもバックグラウンドで継続します。" android:textColor="#6B7280" android:textSize="12sp"/>
+            <Button android:id="@+id/stopButton" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="7dp" android:enabled="false" android:text="今すぐ停止して保存"/>
         </LinearLayout>
 
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="12dp"
-            android:background="@drawable/panel"
-            android:orientation="vertical">
-
-            <TextView
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:text="現在の文字起こし"
-                android:textColor="#111827"
-                android:textSize="18sp"
-                android:textStyle="bold"/>
-
-            <TextView
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="4dp"
-                android:text="文章は適宜段落分けして保存します。枠内をそのまま上下にスワイプして全文を読めます。"
-                android:textColor="#6B7280"
-                android:textSize="12sp"/>
-
-            <EditText
-                android:id="@+id/transcript"
-                android:layout_width="match_parent"
-                android:layout_height="360dp"
-                android:layout_marginTop="8dp"
-                android:background="#FFFFFF"
-                android:fadeScrollbars="false"
-                android:gravity="top|start"
-                android:inputType="textMultiLine|textCapSentences"
-                android:nestedScrollingEnabled="true"
-                android:overScrollMode="always"
-                android:padding="12dp"
-                android:scrollbars="vertical"
-                android:textColor="#111827"
-                android:textSize="15sp"/>
-
-            <TextView
-                android:id="@+id/correctionHint"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="8dp"
-                android:text="停止後に固有名詞などを直して「この修正を学習」を押すと、次回から番組別に補正します。"
-                android:textColor="#0F766E"
-                android:textSize="12sp"/>
-
-            <Button
-                android:id="@+id/learnButton"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="6dp"
-                android:text="この修正を学習"/>
-
-            <Button
-                android:id="@+id/copyButton"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="5dp"
-                android:text="この回を情報つきでコピー"/>
+        <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="12dp" android:background="@drawable/panel" android:orientation="vertical">
+            <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:text="現在の文字起こし" android:textSize="18sp" android:textStyle="bold"/>
+            <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="3dp" android:text="話題転換・無音・長さを見ながら段落を分けます。枠内は独立して上下スクロールできます。" android:textColor="#6B7280" android:textSize="12sp"/>
+            <EditText android:id="@+id/transcript" android:layout_width="match_parent" android:layout_height="360dp" android:layout_marginTop="7dp" android:background="#FFFFFF" android:fadeScrollbars="false" android:gravity="top|start" android:inputType="textMultiLine" android:nestedScrollingEnabled="true" android:overScrollMode="always" android:padding="12dp" android:scrollbars="vertical" android:textSize="15sp"/>
+            <TextView android:id="@+id/correctionHint" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="7dp" android:text="停止後に固有名詞などを直すと、番組別辞書として学習できます。" android:textColor="#0F766E" android:textSize="12sp"/>
+            <Button android:id="@+id/learnButton" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="この修正を学習"/>
+            <Button android:id="@+id/detailButton" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="この回の詳細・タイムラインを開く"/>
+            <Button android:id="@+id/copyButton" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="タイムスタンプ付きでコピー"/>
         </LinearLayout>
 
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="12dp"
-            android:background="@drawable/panel"
-            android:orientation="vertical">
-
-            <TextView
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:text="文字起こしアーカイブ"
-                android:textColor="#111827"
-                android:textSize="18sp"
-                android:textStyle="bold"/>
-
-            <TextView
-                android:id="@+id/libraryCount"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="3dp"
-                android:text="0回保存済み"
-                android:textColor="#6B7280"
-                android:textSize="12sp"/>
-
-            <Spinner
-                android:id="@+id/libraryProgramFilter"
-                android:layout_width="match_parent"
-                android:layout_height="48dp"
-                android:layout_marginTop="7dp"/>
-
-            <EditText
-                android:id="@+id/librarySearch"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:hint="番組名・回名・トーク内容を全文検索"
-                android:inputType="text"
-                android:singleLine="true"/>
-
-            <TextView
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="5dp"
-                android:text="カードをタップで全文表示 / 長押しで削除"
-                android:textColor="#6B7280"
-                android:textSize="11sp"/>
-
-            <LinearLayout
-                android:id="@+id/libraryContainer"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="5dp"
-                android:orientation="vertical"/>
-
-            <Button
-                android:id="@+id/exportJsonButton"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="10dp"
-                android:text="全回＋修正辞書を分析用JSONで書き出す"/>
-
-            <TextView
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="5dp"
-                android:text="JSONには番組名・回名・URL・日時・生の認識結果・修正版全文・学習した表記補正が入ります。"
-                android:textColor="#6B7280"
-                android:textSize="12sp"/>
+        <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="12dp" android:background="@drawable/panel" android:orientation="vertical">
+            <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:text="アーカイブ" android:textSize="18sp" android:textStyle="bold"/>
+            <TextView android:id="@+id/libraryCount" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="3dp" android:text="0回保存済み" android:textColor="#6B7280" android:textSize="12sp"/>
+            <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="horizontal">
+                <Button android:id="@+id/programSummaryButton" android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1" android:text="番組まとめ"/>
+                <Button android:id="@+id/dictionaryButton" android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1" android:text="修正辞書"/>
+            </LinearLayout>
+            <Spinner android:id="@+id/libraryProgramFilter" android:layout_width="match_parent" android:layout_height="48dp" android:layout_marginTop="3dp"/>
+            <EditText android:id="@+id/librarySearch" android:layout_width="match_parent" android:layout_height="wrap_content" android:hint="回名・本文・タグ・メモまで全文検索" android:singleLine="true"/>
+            <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:text="カードをタップすると独立した詳細画面を開きます。" android:textColor="#6B7280" android:textSize="11sp"/>
+            <LinearLayout android:id="@+id/libraryContainer" android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical" android:layout_marginTop="5dp"/>
         </LinearLayout>
 
-        <TextView
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="14dp"
-            android:paddingBottom="18dp"
-            android:text="推奨：ブラウザ再生＋内部音声。長時間の番組は1.0xが最も安定し、1.5x / 2.0xは高速再生補助モードとして認識を細かく区切って処理します。"
-            android:textColor="#92400E"
-            android:textSize="12sp"/>
+        <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="12dp" android:background="@drawable/panel" android:orientation="vertical">
+            <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:text="データ管理" android:textSize="18sp" android:textStyle="bold"/>
+            <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="3dp" android:text="停止・保存時には端末内に3世代の自動バックアップも作ります。" android:textColor="#6B7280" android:textSize="12sp"/>
+            <Button android:id="@+id/backupJsonButton" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="完全バックアップJSONを書き出す"/>
+            <Button android:id="@+id/exportCsvButton" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="一覧・分析用CSVを書き出す"/>
+            <Button android:id="@+id/restoreBackupButton" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="完全バックアップJSONから復元"/>
+            <Button android:id="@+id/restoreAutoButton" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="直近の自動バックアップから復元"/>
+        </LinearLayout>
+
+        <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="14dp" android:paddingBottom="18dp" android:text="推奨：ブラウザ再生＋内部音声。大量の回を蓄積した後は、番組まとめ・全文検索・タグ・タイムライン・JSON/CSVを使って内容を振り返れます。" android:textColor="#92400E" android:textSize="12sp"/>
     </LinearLayout>
 </ScrollView>
