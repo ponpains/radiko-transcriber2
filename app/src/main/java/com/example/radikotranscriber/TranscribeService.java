@@ -23,7 +23,7 @@ public class TranscribeService extends Service {
     private static final int SAMPLE_RATE = 16000;
     private static final long WATCHDOG_INTERVAL_MS = 4000L;
     private static final long STALL_TIMEOUT_MS = 20000L;
-    private static final long SESSION_ROLLOVER_MS = 70000L;
+    private static final long SESSION_ROLLOVER_MS = 65000L;
 
     private final Object pipeLock = new Object();
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
@@ -34,6 +34,8 @@ public class TranscribeService extends Service {
     private ParcelFileDescriptor readFd, writeFd;
     private OutputStream pipeOut;
     private Thread captureThread;
+    private PowerManager.WakeLock wakeLock;
+    private EpisodeStore store;
 
     private volatile boolean running = false;
     private volatile int peak = 0;
@@ -44,9 +46,12 @@ public class TranscribeService extends Service {
     private String partialText = "";
     private String lastCommitted = "";
     private String mode = "internal";
+    private String episodeLabel = "文字起こし中";
+    private long currentEpisodeId = -1L;
 
     private int recognizerGeneration = 0;
     private int reconnectCount = 0;
+    private int permissionErrorRetries = 0;
     private boolean restartScheduled = false;
     private long recognizerSessionStartedAt = 0;
     private long lastRecognizerCallbackAt = 0;
@@ -54,7 +59,6 @@ public class TranscribeService extends Service {
     private final Runnable watchdog = new Runnable() {
         @Override public void run() {
             if (!running) return;
-
             long now = System.currentTimeMillis();
             boolean heardAudioRecently = lastAudibleAt > 0 && now - lastAudibleAt < 7000L;
             boolean recognizerStalled = lastRecognizerCallbackAt > 0
@@ -64,17 +68,16 @@ public class TranscribeService extends Service {
 
             if (!restartScheduled && (sessionTooLong || (heardAudioRecently && recognizerStalled))) {
                 flushPartialForRecovery();
-                requestRecognizerRestart("認識セッションを自動更新しています…", 100L);
+                requestRecognizerRestart("認識器を自動更新しています…", 120L);
             }
-
             if (running) mainHandler.postDelayed(this, WATCHDOG_INTERVAL_MS);
         }
     };
 
     @Override public void onCreate() {
         super.onCreate();
+        store = new EpisodeStore(this);
         createChannel();
-        finalText = getSharedPreferences("state", MODE_PRIVATE).getString("transcript", "");
     }
 
     @Override public int onStartCommand(Intent intent, int flags, int startId) {
@@ -82,28 +85,52 @@ public class TranscribeService extends Service {
         String action = intent.getAction();
 
         if (ACTION_START_INTERNAL.equals(action)) {
+            if (running) return START_NOT_STICKY;
             mode = "internal";
-            startForegroundForMode(false, "内部音声を準備中");
+            loadEpisode(intent.getLongExtra("episodeId", -1L));
+            startForegroundForMode(false, "文字起こしを準備中");
             int resultCode = intent.getIntExtra("resultCode", Activity.RESULT_CANCELED);
             Intent data;
             if (Build.VERSION.SDK_INT >= 33) data = intent.getParcelableExtra("projectionData", Intent.class);
             else data = intent.getParcelableExtra("projectionData");
             beginInternal(resultCode, data);
         } else if (ACTION_START_MIC.equals(action)) {
+            if (running) return START_NOT_STICKY;
             mode = "mic";
-            startForegroundForMode(true, "マイク文字起こし準備中");
+            loadEpisode(intent.getLongExtra("episodeId", -1L));
+            startForegroundForMode(true, "マイク文字起こしを準備中");
             beginMic();
         } else if (ACTION_STOP.equals(action)) {
-            stopEverything("停止しました。");
+            stopEverything("文字起こしを停止しました。自動保存済みです。", "complete");
         }
         return START_NOT_STICKY;
     }
 
-    private void startForegroundForMode(boolean mic, String text) {
+    private void loadEpisode(long id) {
+        currentEpisodeId = id;
+        EpisodeStore.Episode e = store.getEpisode(id);
+        finalText = e == null || e.transcript == null ? "" : e.transcript;
+        lastCommitted = "";
+        if (e != null) {
+            String name = !e.title.isEmpty() ? e.title : e.program;
+            episodeLabel = name.isEmpty() ? "文字起こし中" : name;
+        } else {
+            episodeLabel = "文字起こし中";
+        }
+    }
+
+    private void startForegroundForMode(boolean micOnly, String text) {
         Notification n = notification(text);
         if (Build.VERSION.SDK_INT >= 29) {
-            int type = mic ? ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
-                    : ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION;
+            int type;
+            if (micOnly) {
+                type = ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE;
+            } else {
+                // SpeechRecognizer itself requires RECORD_AUDIO. Keep microphone WIU capability
+                // while the user switches from this app to the browser.
+                type = ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+                        | ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE;
+            }
             startForeground(NOTIFY_ID, n, type);
         } else {
             startForeground(NOTIFY_ID, n);
@@ -125,7 +152,10 @@ public class TranscribeService extends Service {
     }
 
     private void beginInternal(int resultCode, Intent data) {
-        if (data == null || running) return;
+        if (data == null) {
+            stopEverything("共有許可を取得できませんでした。", "error");
+            return;
+        }
         try {
             MediaProjectionManager m = (MediaProjectionManager)getSystemService(MEDIA_PROJECTION_SERVICE);
             projection = m.getMediaProjection(resultCode, data);
@@ -142,19 +172,18 @@ public class TranscribeService extends Service {
                     .setAudioPlaybackCaptureConfig(config)
                     .build();
 
-            beginRecorder("内部音声で文字起こし中。ブラウザでradikoを再生してください。");
+            beginRecorder("バックグラウンドで文字起こし中。ブラウザでradikoを再生してください。");
         } catch (Exception e) {
-            stopEverything("内部音声を開始できませんでした: " + e.getClass().getSimpleName() + " / " + e.getMessage());
+            stopEverything("内部音声を開始できませんでした: " + e.getClass().getSimpleName(), "error");
         }
     }
 
     private void beginMic() {
-        if (running) return;
         try {
             recorder = buildMicRecorder();
-            beginRecorder("マイク経由で文字起こし中。radikoをスピーカーで再生してください。");
+            beginRecorder("バックグラウンドでマイク文字起こし中。スピーカーで再生してください。");
         } catch (Exception e) {
-            stopEverything("マイク文字起こしを開始できませんでした: " + e.getClass().getSimpleName() + " / " + e.getMessage());
+            stopEverything("マイク文字起こしを開始できませんでした: " + e.getClass().getSimpleName(), "error");
         }
     }
 
@@ -180,10 +209,13 @@ public class TranscribeService extends Service {
         peak = 0;
         bytes = 0;
         reconnectCount = 0;
+        permissionErrorRetries = 0;
         partialText = "";
-        lastCommitted = "";
         lastAudibleAt = 0;
         running = true;
+
+        acquireWakeLock();
+        if (currentEpisodeId > 0) store.updateTranscript(currentEpisodeId, finalText, "recording");
 
         recorder.startRecording();
         startCaptureThread();
@@ -192,17 +224,15 @@ public class TranscribeService extends Service {
         mainHandler.postDelayed(watchdog, WATCHDOG_INTERVAL_MS);
 
         broadcast(message, true);
-        updateNotification(mode.equals("mic") ? "マイク経由で文字起こし中" : "ブラウザ内部音声で文字起こし中");
+        updateNotification(message);
     }
 
     private void startRecognizerSession(boolean recovery) {
         mainHandler.post(() -> {
             if (!running) return;
-
             restartScheduled = false;
             recognizerGeneration++;
             final int generation = recognizerGeneration;
-
             if (recovery) reconnectCount++;
 
             destroyRecognizerOnly();
@@ -221,7 +251,6 @@ public class TranscribeService extends Service {
                     private boolean current() {
                         return running && generation == recognizerGeneration;
                     }
-
                     private void touch() {
                         if (current()) lastRecognizerCallbackAt = System.currentTimeMillis();
                     }
@@ -236,23 +265,35 @@ public class TranscribeService extends Service {
                         if (!current()) return;
                         touch();
 
-                        if (error == SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS
-                                || error == SpeechRecognizer.ERROR_LANGUAGE_NOT_SUPPORTED
+                        if (error == SpeechRecognizer.ERROR_LANGUAGE_NOT_SUPPORTED
                                 || error == SpeechRecognizer.ERROR_LANGUAGE_UNAVAILABLE) {
-                            stopEverything("音声認識を継続できません: " + speechError(error));
+                            stopEverything("日本語の音声認識を利用できません。", "error");
                             return;
                         }
 
+                        if (error == SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS) {
+                            permissionErrorRetries++;
+                            if (permissionErrorRetries <= 3) {
+                                flushPartialForRecovery();
+                                requestRecognizerRestart("権限状態を再確認して自動復旧しています…", 1000L);
+                            } else {
+                                stopEverything("音声認識の権限を維持できませんでした。アプリを開いて再開してください。", "error");
+                            }
+                            return;
+                        }
+
+                        permissionErrorRetries = 0;
                         flushPartialForRecovery();
-                        long delay = error == SpeechRecognizer.ERROR_RECOGNIZER_BUSY ? 900L : 300L;
-                        requestRecognizerRestart("音声認識が途切れたため自動再接続します: " + speechError(error), delay);
+                        long delay = error == SpeechRecognizer.ERROR_RECOGNIZER_BUSY ? 1000L : 350L;
+                        requestRecognizerRestart("認識が途切れたため自動復旧しています…", delay);
                     }
 
                     @Override public void onResults(Bundle results) {
                         if (!current()) return;
                         touch();
+                        permissionErrorRetries = 0;
                         appendBest(results);
-                        requestRecognizerRestart("次の音声認識セッションへ接続中…", 180L);
+                        requestRecognizerRestart("次の認識区間へ接続中…", 200L);
                     }
 
                     @Override public void onPartialResults(Bundle partialResults) {
@@ -261,7 +302,7 @@ public class TranscribeService extends Service {
                         ArrayList<String> list = partialResults.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION);
                         if (list != null && !list.isEmpty()) {
                             partialText = list.get(0).trim();
-                            broadcast("認識中。途切れた場合は自動で再接続します。", true);
+                            broadcast("文字起こし中。バックグラウンドでも継続します。", true);
                         }
                     }
 
@@ -270,6 +311,7 @@ public class TranscribeService extends Service {
                     @Override public void onSegmentResults(Bundle segmentResults) {
                         if (!current()) return;
                         touch();
+                        permissionErrorRetries = 0;
                         appendBest(segmentResults);
                     }
 
@@ -277,7 +319,7 @@ public class TranscribeService extends Service {
                         if (!current()) return;
                         touch();
                         flushPartialForRecovery();
-                        requestRecognizerRestart("認識セッション終了。自動で続きを開始します…", 180L);
+                        requestRecognizerRestart("認識区間を更新しています…", 200L);
                     }
 
                     @Override public void onLanguageDetection(Bundle results) {}
@@ -298,13 +340,9 @@ public class TranscribeService extends Service {
                 lastRecognizerCallbackAt = recognizerSessionStartedAt;
                 recognizer.startListening(ri);
 
-                if (recovery) {
-                    broadcast("自動再接続しました。文字起こしを継続中です。", true);
-                }
+                if (recovery) broadcast("自動復旧しました。文字起こしを継続中です。", true);
             } catch (Exception e) {
-                if (running) {
-                    requestRecognizerRestart("認識器の再接続に失敗しました。再試行します…", 1200L);
-                }
+                if (running) requestRecognizerRestart("認識器を再接続しています…", 1300L);
             }
         });
     }
@@ -314,7 +352,6 @@ public class TranscribeService extends Service {
         restartScheduled = true;
         broadcast(statusText, true);
         int generation = recognizerGeneration;
-
         mainHandler.postDelayed(() -> {
             if (!running) return;
             if (generation != recognizerGeneration) {
@@ -328,9 +365,8 @@ public class TranscribeService extends Service {
     private void appendBest(Bundle b) {
         ArrayList<String> list = b.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION);
         if (list == null || list.isEmpty()) return;
-        String s = list.get(0).trim();
         partialText = "";
-        commitText(s);
+        commitText(list.get(0));
     }
 
     private void flushPartialForRecovery() {
@@ -339,22 +375,38 @@ public class TranscribeService extends Service {
         if (p.length() >= 2) commitText(p);
     }
 
-    private void commitText(String s) {
-        if (s == null) return;
-        s = s.trim();
+    private void commitText(String raw) {
+        if (raw == null) return;
+        String s = raw.trim();
         if (s.isEmpty()) return;
-
         if (s.equals(lastCommitted)) return;
-        if (!finalText.isEmpty() && finalText.endsWith(s)) {
+
+        // Avoid cumulative/overlapping results being appended twice across recognizer reconnects.
+        String tail = finalText.length() > 600 ? finalText.substring(finalText.length() - 600) : finalText;
+        if (tail.contains(s)) {
+            lastCommitted = s;
+            return;
+        }
+
+        int max = Math.min(Math.min(finalText.length(), s.length()), 160);
+        int overlap = 0;
+        for (int k = max; k >= 8; k--) {
+            if (finalText.endsWith(s.substring(0, k))) {
+                overlap = k;
+                break;
+            }
+        }
+        String append = s.substring(overlap).trim();
+        if (append.isEmpty()) {
             lastCommitted = s;
             return;
         }
 
         if (!finalText.isEmpty() && !finalText.endsWith("\n")) finalText += "\n";
-        finalText += s;
+        finalText += append;
         lastCommitted = s;
-        getSharedPreferences("state", MODE_PRIVATE).edit().putString("transcript", finalText).apply();
-        broadcast("文字起こし中。", true);
+        if (currentEpisodeId > 0) store.updateTranscript(currentEpisodeId, finalText, "recording");
+        broadcast("文字起こし中。自動保存しています。", true);
     }
 
     private String displayText() {
@@ -390,50 +442,53 @@ public class TranscribeService extends Service {
                     if (localPeak >= 40) lastAudibleAt = System.currentTimeMillis();
 
                     OutputStream target;
-                    synchronized (pipeLock) {
-                        target = pipeOut;
-                    }
-
+                    synchronized (pipeLock) { target = pipeOut; }
                     if (target != null) {
-                        try {
-                            target.write(out, 0, n * 2);
-                        } catch (IOException expectedDuringReconnect) {
-                            if (running) {
-                                try { Thread.sleep(20L); } catch (InterruptedException ignored) {}
-                            }
+                        try { target.write(out, 0, n * 2); }
+                        catch (IOException expectedDuringReconnect) {
+                            if (running) try { Thread.sleep(20L); } catch (InterruptedException ignored) {}
                         }
-                    } else {
-                        try { Thread.sleep(20L); } catch (InterruptedException ignored) {}
                     }
 
                     long now = System.currentTimeMillis();
                     if (now - lastStatus > 1000L) {
                         String s;
                         if (bytes > SAMPLE_RATE * 2L * 6L && peak < 20) {
-                            if (mode.equals("mic")) {
-                                s = "マイク入力がほぼ無音です。端末のスピーカー音量を上げてください。";
-                            } else {
-                                s = "内部音声がほぼ無音です。radikoアプリではなくブラウザ再生を試してください。";
-                            }
-                        } else if (restartScheduled) {
-                            s = "音声は取得中です。認識器を自動再接続しています…";
-                        } else {
                             s = mode.equals("mic")
-                                    ? "マイク経由で文字起こし中。"
-                                    : "ブラウザ内部音声で文字起こし中。";
+                                    ? "マイク入力がほぼ無音です。スピーカー音量を確認してください。"
+                                    : "内部音声がほぼ無音です。ブラウザで再生しているか確認してください。";
+                        } else if (restartScheduled) {
+                            s = "音声取得は継続中。認識器を自動復旧しています…";
+                        } else {
+                            s = "バックグラウンドで文字起こし中。自動保存しています。";
                         }
                         broadcast(s, true);
+                        updateNotification(episodeLabel + " • " + (restartScheduled ? "自動復旧中" : "文字起こし中"));
                         lastStatus = now;
                     }
                 } catch (Exception e) {
                     if (running) {
-                        broadcast("音声入力エラー: " + e.getMessage(), true);
-                        try { Thread.sleep(100L); } catch (InterruptedException ignored) {}
+                        broadcast("音声入力を復旧しています…", true);
+                        try { Thread.sleep(150L); } catch (InterruptedException ignored) {}
                     }
                 }
             }
         }, "AudioToSpeechPipe");
         captureThread.start();
+    }
+
+    private void acquireWakeLock() {
+        try {
+            PowerManager pm = (PowerManager)getSystemService(POWER_SERVICE);
+            wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "RadikoTranscriber:Transcribing");
+            wakeLock.setReferenceCounted(false);
+            wakeLock.acquire();
+        } catch (Exception ignored) {}
+    }
+
+    private void releaseWakeLock() {
+        try { if (wakeLock != null && wakeLock.isHeld()) wakeLock.release(); } catch (Exception ignored) {}
+        wakeLock = null;
     }
 
     private void closePipe() {
@@ -455,32 +510,15 @@ public class TranscribeService extends Service {
         }
     }
 
-    private String speechError(int e) {
-        switch (e) {
-            case SpeechRecognizer.ERROR_AUDIO: return "音声エラー";
-            case SpeechRecognizer.ERROR_CLIENT: return "クライアントエラー";
-            case SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS: return "権限不足";
-            case SpeechRecognizer.ERROR_NETWORK: return "ネットワークエラー";
-            case SpeechRecognizer.ERROR_NETWORK_TIMEOUT: return "ネットワークタイムアウト";
-            case SpeechRecognizer.ERROR_NO_MATCH: return "認識結果なし";
-            case SpeechRecognizer.ERROR_RECOGNIZER_BUSY: return "認識器が使用中";
-            case SpeechRecognizer.ERROR_SERVER: return "認識サービスエラー";
-            case SpeechRecognizer.ERROR_SERVER_DISCONNECTED: return "認識サービス切断";
-            case SpeechRecognizer.ERROR_SPEECH_TIMEOUT: return "音声待ちタイムアウト";
-            case SpeechRecognizer.ERROR_LANGUAGE_NOT_SUPPORTED: return "日本語が未対応";
-            case SpeechRecognizer.ERROR_LANGUAGE_UNAVAILABLE: return "日本語モデルが利用不可";
-            default: return "コード " + e;
-        }
-    }
-
-    private void stopEverything(String message) {
+    private void stopEverything(String message, String finalStatus) {
         if (running) flushPartialForRecovery();
         running = false;
         restartScheduled = false;
         mainHandler.removeCallbacks(watchdog);
 
-        closePipe();
+        if (currentEpisodeId > 0) store.updateTranscript(currentEpisodeId, finalText, finalStatus);
 
+        closePipe();
         try {
             if (recorder != null) {
                 recorder.stop();
@@ -490,9 +528,9 @@ public class TranscribeService extends Service {
         recorder = null;
 
         mainHandler.post(this::destroyRecognizerOnly);
-
         try { if (projection != null) projection.stop(); } catch (Exception ignored) {}
         projection = null;
+        releaseWakeLock();
 
         broadcast(message, false);
         try { stopForeground(STOP_FOREGROUND_REMOVE); } catch (Exception ignored) {}
@@ -507,6 +545,7 @@ public class TranscribeService extends Service {
         i.putExtra("peak", peak);
         i.putExtra("mode", mode);
         i.putExtra("reconnects", reconnectCount);
+        i.putExtra("episodeId", currentEpisodeId);
         i.putExtra("text", displayText());
         sendBroadcast(i);
     }
@@ -514,16 +553,30 @@ public class TranscribeService extends Service {
     private void createChannel() {
         NotificationManager nm = getSystemService(NotificationManager.class);
         NotificationChannel ch = new NotificationChannel(
-                CHANNEL, "文字起こし", NotificationManager.IMPORTANCE_LOW);
+                CHANNEL, "バックグラウンド文字起こし", NotificationManager.IMPORTANCE_LOW);
+        ch.setDescription("radikoの文字起こし実行中に表示します");
         nm.createNotificationChannel(ch);
     }
 
     private Notification notification(String text) {
+        Intent open = new Intent(this, MainActivity.class);
+        open.addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+        PendingIntent openPi = PendingIntent.getActivity(this, 1, open,
+                PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+
+        Intent stop = new Intent(this, TranscribeService.class).setAction(ACTION_STOP);
+        PendingIntent stopPi = PendingIntent.getService(this, 2, stop,
+                PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+
         return new NotificationCompat.Builder(this, CHANNEL)
                 .setSmallIcon(android.R.drawable.ic_btn_speak_now)
-                .setContentTitle("radiko文字起こし")
+                .setContentTitle("radiko文字起こし • 実行中")
                 .setContentText(text)
+                .setContentIntent(openPi)
+                .addAction(android.R.drawable.ic_menu_close_clear_cancel, "停止して保存", stopPi)
                 .setOngoing(true)
+                .setOnlyAlertOnce(true)
+                .setCategory(NotificationCompat.CATEGORY_SERVICE)
                 .build();
     }
 
@@ -531,9 +584,24 @@ public class TranscribeService extends Service {
         getSystemService(NotificationManager.class).notify(NOTIFY_ID, notification(text));
     }
 
+    @Override public void onTaskRemoved(Intent rootIntent) {
+        if (running) updateNotification(episodeLabel + " • バックグラウンドで継続中");
+        super.onTaskRemoved(rootIntent);
+    }
+
     @Override public void onDestroy() {
         mainHandler.removeCallbacks(watchdog);
-        if (running) stopEverything("サービスを終了しました。");
+        if (running) {
+            running = false;
+            if (currentEpisodeId > 0) store.updateTranscript(currentEpisodeId, finalText, "interrupted");
+            closePipe();
+            try { if (recorder != null) { recorder.stop(); recorder.release(); } } catch (Exception ignored) {}
+            recorder = null;
+            destroyRecognizerOnly();
+            try { if (projection != null) projection.stop(); } catch (Exception ignored) {}
+            projection = null;
+            releaseWakeLock();
+        }
         super.onDestroy();
     }
 
