@@ -3,8 +3,9 @@ package com.example.radikotranscriber;
 import android.content.*;
 import android.net.Uri;
 import android.os.Bundle;
-import android.text.method.ScrollingMovementMethod;
+import android.view.MotionEvent;
 import android.view.View;
+import android.view.ViewParent;
 import android.widget.*;
 
 import androidx.appcompat.app.AlertDialog;
@@ -28,7 +29,9 @@ public class EpisodeDetailActivity extends AppCompatActivity {
         program=findViewById(R.id.detailProgram);title=findViewById(R.id.detailTitle);url=findViewById(R.id.detailUrl);
         transcript=findViewById(R.id.detailTranscript);notes=findViewById(R.id.detailNotes);tags=findViewById(R.id.detailTags);keyPoints=findViewById(R.id.detailKeyPoints);
         search=findViewById(R.id.detailSearch);meta=findViewById(R.id.detailMeta);corrections=findViewById(R.id.detailCorrections);timeline=findViewById(R.id.timelineContainer);
-        transcript.setMovementMethod(ScrollingMovementMethod.getInstance());
+
+        setupTranscriptEditor();
+
         findViewById(R.id.detailSave).setOnClickListener(v->saveAll(true));
         findViewById(R.id.detailLearn).setOnClickListener(v->learn());
         findViewById(R.id.detailCopy).setOnClickListener(v->copy());
@@ -37,6 +40,22 @@ public class EpisodeDetailActivity extends AppCompatActivity {
         findViewById(R.id.detailFindNext).setOnClickListener(v->findNext());
         findViewById(R.id.detailDictionary).setOnClickListener(v->{Intent i=new Intent(this,DictionaryActivity.class);i.putExtra("program",program.getText().toString().trim());startActivity(i);});
         load();
+    }
+
+    private void setupTranscriptEditor() {
+        // 標準のEditTextカーソル移動を残しつつ、枠内の縦スクロールだけ親へ奪われないようにする。
+        transcript.setVerticalScrollBarEnabled(true);
+        transcript.setNestedScrollingEnabled(true);
+        transcript.setOverScrollMode(View.OVER_SCROLL_ALWAYS);
+        transcript.setOnTouchListener((v, e) -> {
+            ViewParent p = v.getParent();
+            if (p != null) {
+                int a = e.getActionMasked();
+                if (a == MotionEvent.ACTION_DOWN || a == MotionEvent.ACTION_MOVE) p.requestDisallowInterceptTouchEvent(true);
+                else if (a == MotionEvent.ACTION_UP || a == MotionEvent.ACTION_CANCEL) p.requestDisallowInterceptTouchEvent(false);
+            }
+            return false;
+        });
     }
 
     private void load() {
