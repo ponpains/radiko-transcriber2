@@ -45,5 +45,5 @@ jobs:
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: radiko-transcriber-v07-apk
+          name: radiko-transcriber-v09-apk
           path: app/build/outputs/apk/debug/app-debug.apk
