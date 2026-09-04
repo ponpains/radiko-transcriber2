@@ -22,7 +22,7 @@
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:layout_marginTop="4dp"
-            android:text="試作版 0.6"
+            android:text="試作版 0.7"
             android:textColor="#6B7280"
             android:textSize="12sp"/>
 
@@ -55,7 +55,14 @@
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="10dp"
-                android:text="radikoでこの回を開く"/>
+                android:text="radikoアプリでこの回を開く"/>
+
+            <Button
+                android:id="@+id/openBrowser"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="6dp"
+                android:text="ブラウザでこの回を開く"/>
         </LinearLayout>
 
         <LinearLayout
@@ -77,16 +84,23 @@
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="6dp"
-                android:text="①「文字起こし開始」→ ② Androidの共有許可 → ③ radikoで再生。停止すると結果が残ります。"
+                android:text="まず内部音声を試してください。radikoアプリで入力レベルが0のままならブラウザ再生を試し、それでも駄目ならマイク経由を使います。"
                 android:textColor="#6B7280"
                 android:textSize="13sp"/>
 
             <Button
-                android:id="@+id/startButton"
+                android:id="@+id/internalStartButton"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="10dp"
-                android:text="文字起こし開始"/>
+                android:text="① 内部音声で文字起こし開始"/>
+
+            <Button
+                android:id="@+id/micStartButton"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="6dp"
+                android:text="② マイク経由で文字起こし開始"/>
 
             <Button
                 android:id="@+id/stopButton"
@@ -114,6 +128,14 @@
                 android:layout_marginTop="6dp"
                 android:text="入力レベル: 0"
                 android:textColor="#6B7280"
+                android:textSize="12sp"/>
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="マイク経由では、端末のスピーカーからradikoを流してください。イヤホン使用時はマイクに音が届かないため文字起こしできません。"
+                android:textColor="#92400E"
                 android:textSize="12sp"/>
         </LinearLayout>
 
@@ -169,7 +191,7 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="14dp"
-            android:text="Android公式の再生音声キャプチャ機能だけを使います。再生アプリ側がキャプチャを禁止している音声は取得しません。"
+            android:text="内部音声モードはAndroid公式の再生音声キャプチャ機能を使います。再生アプリ側がキャプチャを禁止している場合は取得できません。その場合はブラウザ再生またはマイク経由を使います。"
             android:textColor="#92400E"
             android:textSize="12sp"/>
     </LinearLayout>
