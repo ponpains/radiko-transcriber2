@@ -138,12 +138,19 @@ public class EpisodeStore extends SQLiteOpenHelper {
         getWritableDatabase().update("episodes", v, "id=?", new String[]{String.valueOf(id)});
     }
 
+    private void updateLearningBaseline(long id, String text) {
+        ContentValues v = new ContentValues();
+        v.put("auto_transcript", safe(text));
+        v.put("transcript", safe(text));
+        v.put("updated_at", System.currentTimeMillis());
+        getWritableDatabase().update("episodes", v, "id=?", new String[]{String.valueOf(id)});
+    }
+
     public Episode getEpisode(long id) {
         Cursor c = getReadableDatabase().query("episodes", null, "id=?",
                 new String[]{String.valueOf(id)}, null, null, null);
-        try {
-            return c.moveToFirst() ? fromCursor(c) : null;
-        } finally { c.close(); }
+        try { return c.moveToFirst() ? fromCursor(c) : null; }
+        finally { c.close(); }
     }
 
     public ArrayList<Episode> listEpisodes(String query) {
@@ -171,9 +178,8 @@ public class EpisodeStore extends SQLiteOpenHelper {
         String[] selectionArgs = args.isEmpty() ? null : args.toArray(new String[0]);
         Cursor c = getReadableDatabase().query("episodes", null, selection, selectionArgs,
                 null, null, "updated_at DESC", "500");
-        try {
-            while (c.moveToNext()) out.add(fromCursor(c));
-        } finally { c.close(); }
+        try { while (c.moveToNext()) out.add(fromCursor(c)); }
+        finally { c.close(); }
         return out;
     }
 
@@ -181,9 +187,8 @@ public class EpisodeStore extends SQLiteOpenHelper {
         ArrayList<String> out = new ArrayList<>();
         Cursor c = getReadableDatabase().rawQuery(
                 "SELECT DISTINCT program FROM episodes WHERE TRIM(program)<>'' ORDER BY program COLLATE NOCASE", null);
-        try {
-            while (c.moveToNext()) out.add(c.getString(0));
-        } finally { c.close(); }
+        try { while (c.moveToNext()) out.add(c.getString(0)); }
+        finally { c.close(); }
         return out;
     }
 
@@ -198,6 +203,14 @@ public class EpisodeStore extends SQLiteOpenHelper {
     }
 
     public void addCorrection(String program, String wrong, String correct) {
+        addCorrectionInternal(program, wrong, correct, true);
+    }
+
+    private void ensureCorrection(String program, String wrong, String correct) {
+        addCorrectionInternal(program, wrong, correct, false);
+    }
+
+    private void addCorrectionInternal(String program, String wrong, String correct, boolean incrementExisting) {
         program = safe(program).trim();
         wrong = safe(wrong).trim();
         correct = safe(correct).trim();
@@ -211,10 +224,12 @@ public class EpisodeStore extends SQLiteOpenHelper {
                 null, null, null);
         try {
             if (c.moveToFirst()) {
-                ContentValues u = new ContentValues();
-                u.put("uses", c.getInt(1) + 1);
-                u.put("updated_at", now);
-                db.update("corrections", u, "id=?", new String[]{String.valueOf(c.getLong(0))});
+                if (incrementExisting) {
+                    ContentValues u = new ContentValues();
+                    u.put("uses", c.getInt(1) + 1);
+                    u.put("updated_at", now);
+                    db.update("corrections", u, "id=?", new String[]{String.valueOf(c.getLong(0))});
+                }
                 return;
             }
         } finally { c.close(); }
@@ -238,7 +253,7 @@ public class EpisodeStore extends SQLiteOpenHelper {
                     null, null, "uses DESC, LENGTH(wrong) DESC", "100");
         } else {
             c = getReadableDatabase().query("corrections", null, "program=? OR program=''",
-                    new String[]{p}, null, null, "CASE WHEN program=? THEN 0 ELSE 1 END, uses DESC, LENGTH(wrong) DESC", "100");
+                    new String[]{p}, null, null, "uses DESC, LENGTH(wrong) DESC", "100");
         }
         try {
             while (c.moveToNext()) {
@@ -289,16 +304,16 @@ public class EpisodeStore extends SQLiteOpenHelper {
         double best = -1e9;
         String bestText = candidates.get(0);
         for (int i = 0; i < candidates.size(); i++) {
-            String c = candidates.get(i) == null ? "" : candidates.get(i);
+            String candidate = candidates.get(i) == null ? "" : candidates.get(i);
             double score = confidence != null && i < confidence.length && confidence[i] >= 0
                     ? confidence[i] * 3.0 : 0.0;
             for (Correction r : rules) {
-                if (c.contains(r.correct)) score += 5.0 + Math.min(r.uses, 5);
-                if (c.contains(r.wrong)) score -= 4.0 + Math.min(r.uses, 5);
+                if (candidate.contains(r.correct)) score += 5.0 + Math.min(r.uses, 5);
+                if (candidate.contains(r.wrong)) score -= 4.0 + Math.min(r.uses, 5);
             }
-            if (score > best) { best = score; bestText = c; }
+            if (score > best) { best = score; bestText = candidate; }
         }
-        return applyCorrections(program, bestText);
+        return bestText;
     }
 
     public int learnCorrectionsFromEdit(long episodeId, String editedText) {
@@ -307,6 +322,7 @@ public class EpisodeStore extends SQLiteOpenHelper {
         String before = safe(e.autoTranscript);
         String after = safe(editedText);
         if (before.equals(after)) return 0;
+
         ArrayList<String[]> pairs = new ArrayList<>();
         collectDiffs(before, after, pairs, 0);
         LinkedHashSet<String> seen = new LinkedHashSet<>();
@@ -321,7 +337,7 @@ public class EpisodeStore extends SQLiteOpenHelper {
             addCorrection(e.program, wrong, correct);
             learned++;
         }
-        updateEditedTranscript(episodeId, editedText);
+        updateLearningBaseline(episodeId, after);
         return learned;
     }
 
@@ -364,7 +380,8 @@ public class EpisodeStore extends SQLiteOpenHelper {
 
     private int commonPrefix(String a, String b) {
         int n = Math.min(a.length(), b.length());
-        int i = 0; while (i < n && a.charAt(i) == b.charAt(i)) i++;
+        int i = 0;
+        while (i < n && a.charAt(i) == b.charAt(i)) i++;
         return i;
     }
 
@@ -386,8 +403,8 @@ public class EpisodeStore extends SQLiteOpenHelper {
     private void ensureStarterCorrections(String program) {
         String p = safe(program);
         if (p.contains("けれけれ")) {
-            addCorrection(p, "キレキレ", "けれけれ");
-            addCorrection(p, "中田詩織", "永田詩央里");
+            ensureCorrection(p, "キレキレ", "けれけれ");
+            ensureCorrection(p, "中田詩織", "永田詩央里");
         }
     }
 
@@ -410,6 +427,7 @@ public class EpisodeStore extends SQLiteOpenHelper {
                 arr.put(o);
             } catch (Exception ignored) {}
         }
+
         JSONArray corrections = new JSONArray();
         Cursor c = getReadableDatabase().query("corrections", null, null, null, null, null,
                 "program, uses DESC, LENGTH(wrong) DESC");
@@ -422,7 +440,9 @@ public class EpisodeStore extends SQLiteOpenHelper {
                 o.put("uses", c.getInt(c.getColumnIndexOrThrow("uses")));
                 corrections.put(o);
             }
-        } catch (Exception ignored) {} finally { c.close(); }
+        } catch (Exception ignored) {}
+        finally { c.close(); }
+
         try {
             JSONObject root = new JSONObject();
             root.put("format", "radiko-transcriber-export-v2");
@@ -450,9 +470,9 @@ public class EpisodeStore extends SQLiteOpenHelper {
         e.program = c.getString(c.getColumnIndexOrThrow("program"));
         e.title = c.getString(c.getColumnIndexOrThrow("title"));
         e.url = c.getString(c.getColumnIndexOrThrow("url"));
-        e.rawTranscript = column(c, "raw_transcript", e.transcript);
-        e.autoTranscript = column(c, "auto_transcript", e.rawTranscript);
         e.transcript = c.getString(c.getColumnIndexOrThrow("transcript"));
+        e.rawTranscript = column(c, "raw_transcript", e.transcript);
+        e.autoTranscript = column(c, "auto_transcript", e.transcript);
         if (e.rawTranscript == null || e.rawTranscript.isEmpty()) e.rawTranscript = e.transcript;
         if (e.autoTranscript == null || e.autoTranscript.isEmpty()) e.autoTranscript = e.transcript;
         e.status = c.getString(c.getColumnIndexOrThrow("status"));
