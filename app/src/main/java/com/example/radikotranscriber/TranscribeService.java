@@ -2,6 +2,7 @@ package com.example.radikotranscriber;
 
 import android.app.*;
 import android.content.*;
+import android.content.pm.ServiceInfo;
 import android.media.*;
 import android.media.projection.*;
 import android.os.*;
@@ -12,7 +13,8 @@ import java.io.*;
 import java.util.ArrayList;
 
 public class TranscribeService extends Service {
-    public static final String ACTION_START = "com.example.radikotranscriber.START";
+    public static final String ACTION_START_INTERNAL = "com.example.radikotranscriber.START_INTERNAL";
+    public static final String ACTION_START_MIC = "com.example.radikotranscriber.START_MIC";
     public static final String ACTION_STOP = "com.example.radikotranscriber.STOP";
     public static final String ACTION_UPDATE = "com.example.radikotranscriber.UPDATE";
 
@@ -30,6 +32,7 @@ public class TranscribeService extends Service {
     private int peak = 0;
     private long bytes = 0;
     private String finalText = "";
+    private String mode = "internal";
 
     @Override public void onCreate() {
         super.onCreate();
@@ -39,23 +42,52 @@ public class TranscribeService extends Service {
 
     @Override public int onStartCommand(Intent intent, int flags, int startId) {
         if (intent == null) return START_NOT_STICKY;
-        if (ACTION_START.equals(intent.getAction())) {
-            startForeground(NOTIFY_ID, notification("文字起こし準備中"));
+        String action = intent.getAction();
+
+        if (ACTION_START_INTERNAL.equals(action)) {
+            mode = "internal";
+            startForegroundForMode(false, "内部音声を準備中");
             int resultCode = intent.getIntExtra("resultCode", Activity.RESULT_CANCELED);
             Intent data;
-            if (Build.VERSION.SDK_INT >= 33) {
-                data = intent.getParcelableExtra("projectionData", Intent.class);
-            } else {
-                data = intent.getParcelableExtra("projectionData");
-            }
-            begin(resultCode, data);
-        } else if (ACTION_STOP.equals(intent.getAction())) {
+            if (Build.VERSION.SDK_INT >= 33) data = intent.getParcelableExtra("projectionData", Intent.class);
+            else data = intent.getParcelableExtra("projectionData");
+            beginInternal(resultCode, data);
+        } else if (ACTION_START_MIC.equals(action)) {
+            mode = "mic";
+            startForegroundForMode(true, "マイク文字起こし準備中");
+            beginMic();
+        } else if (ACTION_STOP.equals(action)) {
             stopEverything("停止しました。");
         }
         return START_NOT_STICKY;
     }
 
-    private void begin(int resultCode, Intent data) {
+    private void startForegroundForMode(boolean mic, String text) {
+        Notification n = notification(text);
+        if (Build.VERSION.SDK_INT >= 29) {
+            int type = mic ? ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+                    : ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION;
+            startForeground(NOTIFY_ID, n, type);
+        } else {
+            startForeground(NOTIFY_ID, n);
+        }
+    }
+
+    private AudioFormat audioFormat() {
+        return new AudioFormat.Builder()
+                .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                .setSampleRate(SAMPLE_RATE)
+                .setChannelMask(AudioFormat.CHANNEL_IN_MONO)
+                .build();
+    }
+
+    private int bufferBytes() {
+        int min = AudioRecord.getMinBufferSize(
+                SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT);
+        return Math.max(min * 4, 32768);
+    }
+
+    private void beginInternal(int resultCode, Intent data) {
         if (data == null || running) return;
         try {
             MediaProjectionManager m = (MediaProjectionManager)getSystemService(MEDIA_PROJECTION_SERVICE);
@@ -67,36 +99,61 @@ public class TranscribeService extends Service {
                             .addMatchingUsage(AudioAttributes.USAGE_UNKNOWN)
                             .build();
 
-            AudioFormat format = new AudioFormat.Builder()
-                    .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-                    .setSampleRate(SAMPLE_RATE)
-                    .setChannelMask(AudioFormat.CHANNEL_IN_MONO)
-                    .build();
-
-            int min = AudioRecord.getMinBufferSize(
-                    SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT);
-
             recorder = new AudioRecord.Builder()
-                    .setAudioFormat(format)
-                    .setBufferSizeInBytes(Math.max(min * 4, 32768))
+                    .setAudioFormat(audioFormat())
+                    .setBufferSizeInBytes(bufferBytes())
                     .setAudioPlaybackCaptureConfig(config)
                     .build();
 
-            ParcelFileDescriptor[] pipe = ParcelFileDescriptor.createPipe();
-            readFd = pipe[0];
-            writeFd = pipe[1];
-            pipeOut = new ParcelFileDescriptor.AutoCloseOutputStream(writeFd);
-
-            running = true;
-            startRecognizer();
-            recorder.startRecording();
-            startCaptureThread();
-
-            broadcast("文字起こし中。radikoでPodcastを再生してください。", true);
-            updateNotification("文字起こし中");
+            beginRecorder("内部音声で文字起こし中。radikoまたはブラウザで再生してください。");
         } catch (Exception e) {
-            stopEverything("開始できませんでした: " + e.getClass().getSimpleName() + " / " + e.getMessage());
+            stopEverything("内部音声を開始できませんでした: " + e.getClass().getSimpleName() + " / " + e.getMessage());
         }
+    }
+
+    private void beginMic() {
+        if (running) return;
+        try {
+            recorder = buildMicRecorder();
+            beginRecorder("マイク経由で文字起こし中。radikoをスピーカーで再生してください。");
+        } catch (Exception e) {
+            stopEverything("マイク文字起こしを開始できませんでした: " + e.getClass().getSimpleName() + " / " + e.getMessage());
+        }
+    }
+
+    private AudioRecord buildMicRecorder() {
+        try {
+            AudioRecord r = new AudioRecord.Builder()
+                    .setAudioSource(MediaRecorder.AudioSource.UNPROCESSED)
+                    .setAudioFormat(audioFormat())
+                    .setBufferSizeInBytes(bufferBytes())
+                    .build();
+            if (r.getState() == AudioRecord.STATE_INITIALIZED) return r;
+            r.release();
+        } catch (Exception ignored) {}
+
+        return new AudioRecord.Builder()
+                .setAudioSource(MediaRecorder.AudioSource.MIC)
+                .setAudioFormat(audioFormat())
+                .setBufferSizeInBytes(bufferBytes())
+                .build();
+    }
+
+    private void beginRecorder(String message) throws Exception {
+        ParcelFileDescriptor[] pipe = ParcelFileDescriptor.createPipe();
+        readFd = pipe[0];
+        writeFd = pipe[1];
+        pipeOut = new ParcelFileDescriptor.AutoCloseOutputStream(writeFd);
+
+        peak = 0;
+        bytes = 0;
+        running = true;
+        recorder.startRecording();
+        startRecognizer();
+        startCaptureThread();
+
+        broadcast(message, true);
+        updateNotification(mode.equals("mic") ? "マイク経由で文字起こし中" : "内部音声で文字起こし中");
     }
 
     private void startRecognizer() {
@@ -111,24 +168,15 @@ public class TranscribeService extends Service {
                     @Override public void onEndOfSpeech() {}
                     @Override public void onError(int error) {
                         if (!running) return;
-                        String msg = speechError(error);
-                        broadcast("音声認識エラー: " + msg + "。再試行します…", true);
-                        restartRecognizerDelayed();
+                        broadcast("音声認識エラー: " + speechError(error), true);
                     }
-                    @Override public void onResults(Bundle results) {
-                        appendBest(results);
-                        if (running) restartRecognizerDelayed();
-                    }
+                    @Override public void onResults(Bundle results) { appendBest(results); }
                     @Override public void onPartialResults(Bundle partialResults) {
                         ArrayList<String> list = partialResults.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION);
-                        if (list != null && !list.isEmpty()) {
-                            broadcast("認識中: " + list.get(0), true);
-                        }
+                        if (list != null && !list.isEmpty()) broadcast("認識中: " + list.get(0), true);
                     }
                     @Override public void onEvent(int eventType, Bundle params) {}
-                    @Override public void onSegmentResults(Bundle segmentResults) {
-                        appendBest(segmentResults);
-                    }
+                    @Override public void onSegmentResults(Bundle segmentResults) { appendBest(segmentResults); }
                     @Override public void onEndOfSegmentedSession() {}
                     @Override public void onLanguageDetection(Bundle results) {}
                 });
@@ -148,12 +196,6 @@ public class TranscribeService extends Service {
                 broadcast("認識器を開始できません: " + e.getMessage(), true);
             }
         });
-    }
-
-    private void restartRecognizerDelayed() {
-        // EXTRA_AUDIO_SOURCE uses a pipe that belongs to the running session.
-        // Some recognition providers keep the segmented session alive until the pipe closes.
-        // If a provider ends early, avoid reopening the same fd aggressively.
     }
 
     private void appendBest(Bundle b) {
@@ -182,8 +224,8 @@ public class TranscribeService extends Service {
                         int v = buf[i];
                         int a = Math.abs(v);
                         if (a > localPeak) localPeak = a;
-                        out[i*2] = (byte)(v & 0xff);
-                        out[i*2+1] = (byte)((v >> 8) & 0xff);
+                        out[i * 2] = (byte)(v & 0xff);
+                        out[i * 2 + 1] = (byte)((v >> 8) & 0xff);
                     }
                     peak = localPeak;
                     bytes += n * 2L;
@@ -193,9 +235,15 @@ public class TranscribeService extends Service {
                     if (now - last > 1000) {
                         String s;
                         if (bytes > SAMPLE_RATE * 2L * 6L && peak < 20) {
-                            s = "音声がほぼ無音です。radikoが再生中なら、再生側がキャプチャを許可していない可能性があります。";
+                            if (mode.equals("mic")) {
+                                s = "マイク入力がほぼ無音です。端末のスピーカー音量を上げて、radikoを再生してください。";
+                            } else {
+                                s = "内部音声がほぼ無音です。radikoアプリが取得を許可していない可能性があります。ブラウザ再生かマイク経由を試してください。";
+                            }
                         } else {
-                            s = "文字起こし中。radikoで再生してください。";
+                            s = mode.equals("mic")
+                                    ? "マイク経由で文字起こし中。"
+                                    : "内部音声で文字起こし中。";
                         }
                         broadcast(s, true);
                         last = now;
@@ -204,7 +252,7 @@ public class TranscribeService extends Service {
             } catch (Exception e) {
                 if (running) broadcast("音声入力エラー: " + e.getMessage(), true);
             }
-        }, "PlaybackToSpeechPipe");
+        }, "AudioToSpeechPipe");
         captureThread.start();
     }
 
@@ -251,7 +299,7 @@ public class TranscribeService extends Service {
         projection = null;
 
         broadcast(message, false);
-        stopForeground(STOP_FOREGROUND_REMOVE);
+        try { stopForeground(STOP_FOREGROUND_REMOVE); } catch (Exception ignored) {}
         stopSelf();
     }
 
@@ -261,6 +309,7 @@ public class TranscribeService extends Service {
         i.putExtra("status", status);
         i.putExtra("running", isRunning);
         i.putExtra("peak", peak);
+        i.putExtra("mode", mode);
         i.putExtra("text", finalText);
         sendBroadcast(i);
     }
