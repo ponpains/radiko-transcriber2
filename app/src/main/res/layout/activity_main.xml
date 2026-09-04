@@ -23,7 +23,7 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="3dp"
-            android:text="v0.12  •  録音はホーム / 大量の過去回はアーカイブで管理"
+            android:text="v0.13  •  高速再生バッファ / 診断ログ / 再生位置 / アプリ内Web実験"
             android:textColor="#6B7280"
             android:textSize="12sp"/>
 
@@ -81,7 +81,7 @@
             <TextView
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:text="1.5x / 2.0xでは入力音声を認識用に引き伸ばす補助と、候補比較・番組辞書を併用します。"
+                android:text="1.5x / 2.0xは音声取得と認識を分離します。再生を取りこぼさず一時バッファへ保存し、認識後に自動削除します。"
                 android:textColor="#6B7280"
                 android:textSize="11sp"/>
 
@@ -94,12 +94,19 @@
                 android:text="再生終了を判定して自動停止・保存"
                 android:textSize="13sp"/>
 
+            <CheckBox
+                android:id="@+id/inAppPlaybackCheck"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="実験：開始後は外部ブラウザではなくアプリ内Webで開く"
+                android:textSize="13sp"/>
+
             <Button
                 android:id="@+id/startButton"
                 android:layout_width="match_parent"
                 android:layout_height="56dp"
                 android:layout_marginTop="8dp"
-                android:text="文字起こし開始 → ブラウザを開く"
+                android:text="文字起こし開始 → 再生画面を開く"
                 android:textSize="15sp"
                 android:textStyle="bold"/>
 
@@ -107,7 +114,13 @@
                 android:id="@+id/openBrowserButton"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:text="ブラウザだけ開く"/>
+                android:text="外部ブラウザだけ開く"/>
+
+            <Button
+                android:id="@+id/openInAppButton"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="実験：アプリ内Webだけ開く"/>
 
             <Button
                 android:id="@+id/micStartButton"
@@ -157,10 +170,21 @@
                 android:textSize="12sp"/>
 
             <TextView
+                android:id="@+id/playbackPanel"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="6dp"
+                android:background="#ECFDF5"
+                android:padding="10dp"
+                android:text="再生位置：—"
+                android:textColor="#065F46"
+                android:textSize="12sp"/>
+
+            <TextView
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="5dp"
-                android:text="開始後はブラウザや他アプリを開いてもバックグラウンドで継続します。"
+                android:text="文字欄を触っても文字起こし本体は止まりません。ホームへ戻った時も自動で再同期します。"
                 android:textColor="#6B7280"
                 android:textSize="12sp"/>
 
@@ -191,7 +215,7 @@
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="3dp"
-                android:text="段落を細かめに整えます。枠内は上下スクロールでき、キーボードの左右カーソル移動も使えます。"
+                android:text="文ごとに改行し、話題転換や長い無音では空行を入れます。左右カーソル移動も使えます。"
                 android:textColor="#6B7280"
                 android:textSize="12sp"/>
 
@@ -320,6 +344,19 @@
                 android:textSize="12sp"/>
 
             <Button
+                android:id="@+id/diagnosticShareButton"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="修正用診断パックを共有（直近3回）"/>
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="テスト後はこれをこのチャットへ共有するだけでOKです。中身を確認する必要はありません。音声そのものは含みません。"
+                android:textColor="#6B7280"
+                android:textSize="11sp"/>
+
+            <Button
                 android:id="@+id/backupJsonButton"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
@@ -349,7 +386,7 @@
             android:layout_height="wrap_content"
             android:layout_marginTop="14dp"
             android:paddingBottom="18dp"
-            android:text="推奨：ブラウザ再生＋内部音声。大量の回はホームでスクロールせず、専用アーカイブから探せます。"
+            android:text="安定優先なら外部ブラウザ＋1.0x。アプリ内Webは独立した実験機能なので、合わなければOFFのままで問題ありません。"
             android:textColor="#92400E"
             android:textSize="12sp"/>
     </LinearLayout>
