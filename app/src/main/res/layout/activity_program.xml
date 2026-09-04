@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android" android:layout_width="match_parent" android:layout_height="match_parent" android:background="#F4F5F7">
+    <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical" android:padding="16dp">
+        <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:text="番組まとめ" android:textSize="24sp" android:textStyle="bold"/>
+        <Spinner android:id="@+id/programSpinner" android:layout_width="match_parent" android:layout_height="48dp" android:layout_marginTop="8dp"/>
+        <TextView android:id="@+id/programStats" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="8dp" android:background="@drawable/panel" android:padding="12dp" android:textSize="14sp"/>
+        <Button android:id="@+id/programDictionary" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="8dp" android:text="この番組の修正辞書を開く"/>
+        <EditText android:id="@+id/programSearch" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="10dp" android:hint="この番組の回名・本文・タグ・メモを検索" android:singleLine="true"/>
+        <LinearLayout android:id="@+id/programEpisodes" android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical" android:layout_marginTop="8dp"/>
+        <Space android:layout_width="match_parent" android:layout_height="24dp"/>
+    </LinearLayout>
+</ScrollView>
