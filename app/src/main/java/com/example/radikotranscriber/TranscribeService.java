@@ -7,6 +7,7 @@ import android.media.*;
 import android.media.projection.*;
 import android.os.*;
 import android.speech.*;
+
 import androidx.core.app.NotificationCompat;
 
 import java.io.*;
@@ -21,9 +22,9 @@ public class TranscribeService extends Service {
     private static final String CHANNEL = "transcribe";
     private static final int NOTIFY_ID = 606;
     private static final int SAMPLE_RATE = 16000;
-    private static final long WATCHDOG_INTERVAL_MS = 4000L;
-    private static final long STALL_TIMEOUT_MS = 20000L;
-    private static final long SESSION_ROLLOVER_MS = 65000L;
+    private static final long WATCHDOG_INTERVAL_MS = 2000L;
+    private static final long AUTO_STOP_SILENCE_MS = 18000L;
+    private static final long AUTO_STOP_MIN_AUDIO_MS = 25000L;
 
     private final Object pipeLock = new Object();
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
@@ -40,14 +41,21 @@ public class TranscribeService extends Service {
     private volatile boolean running = false;
     private volatile int peak = 0;
     private volatile long bytes = 0;
+    private volatile long firstAudibleAt = 0;
     private volatile long lastAudibleAt = 0;
 
+    private String rawText = "";
     private String finalText = "";
     private String partialText = "";
     private String lastCommitted = "";
     private String mode = "internal";
+    private String program = "";
+    private String episodeTitle = "";
     private String episodeLabel = "文字起こし中";
     private long currentEpisodeId = -1L;
+
+    private float playbackSpeed = 1.0f;
+    private boolean autoStopEnabled = true;
 
     private int recognizerGeneration = 0;
     private int reconnectCount = 0;
@@ -60,15 +68,29 @@ public class TranscribeService extends Service {
         @Override public void run() {
             if (!running) return;
             long now = System.currentTimeMillis();
+
+            if (autoStopEnabled && firstAudibleAt > 0
+                    && now - firstAudibleAt >= AUTO_STOP_MIN_AUDIO_MS
+                    && now - lastAudibleAt >= AUTO_STOP_SILENCE_MS) {
+                flushPartialForRecovery();
+                stopEverything("再生終了（無音）を検知したため、自動停止して保存しました。", "complete");
+                return;
+            }
+
+            long stallTimeout = playbackSpeed >= 1.9f ? 11000L
+                    : playbackSpeed >= 1.4f ? 15000L : 20000L;
+            long rollover = playbackSpeed >= 1.9f ? 30000L
+                    : playbackSpeed >= 1.4f ? 44000L : 65000L;
+
             boolean heardAudioRecently = lastAudibleAt > 0 && now - lastAudibleAt < 7000L;
             boolean recognizerStalled = lastRecognizerCallbackAt > 0
-                    && now - lastRecognizerCallbackAt > STALL_TIMEOUT_MS;
+                    && now - lastRecognizerCallbackAt > stallTimeout;
             boolean sessionTooLong = recognizerSessionStartedAt > 0
-                    && now - recognizerSessionStartedAt > SESSION_ROLLOVER_MS;
+                    && now - recognizerSessionStartedAt > rollover;
 
             if (!restartScheduled && (sessionTooLong || (heardAudioRecently && recognizerStalled))) {
                 flushPartialForRecovery();
-                requestRecognizerRestart("認識器を自動更新しています…", 120L);
+                requestRecognizerRestart("認識器を自動更新しています…", 150L);
             }
             if (running) mainHandler.postDelayed(this, WATCHDOG_INTERVAL_MS);
         }
@@ -87,6 +109,8 @@ public class TranscribeService extends Service {
         if (ACTION_START_INTERNAL.equals(action)) {
             if (running) return START_NOT_STICKY;
             mode = "internal";
+            playbackSpeed = clampSpeed(intent.getFloatExtra("playbackSpeed", 1.0f));
+            autoStopEnabled = intent.getBooleanExtra("autoStop", true);
             loadEpisode(intent.getLongExtra("episodeId", -1L));
             startForegroundForMode(false, "文字起こしを準備中");
             int resultCode = intent.getIntExtra("resultCode", Activity.RESULT_CANCELED);
@@ -97,6 +121,8 @@ public class TranscribeService extends Service {
         } else if (ACTION_START_MIC.equals(action)) {
             if (running) return START_NOT_STICKY;
             mode = "mic";
+            playbackSpeed = clampSpeed(intent.getFloatExtra("playbackSpeed", 1.0f));
+            autoStopEnabled = intent.getBooleanExtra("autoStop", true);
             loadEpisode(intent.getLongExtra("episodeId", -1L));
             startForegroundForMode(true, "マイク文字起こしを準備中");
             beginMic();
@@ -106,31 +132,39 @@ public class TranscribeService extends Service {
         return START_NOT_STICKY;
     }
 
+    private float clampSpeed(float speed) {
+        if (speed >= 1.9f) return 2.0f;
+        if (speed >= 1.4f) return 1.5f;
+        return 1.0f;
+    }
+
     private void loadEpisode(long id) {
         currentEpisodeId = id;
         EpisodeStore.Episode e = store.getEpisode(id);
-        finalText = e == null || e.transcript == null ? "" : e.transcript;
-        lastCommitted = "";
-        if (e != null) {
-            String name = !e.title.isEmpty() ? e.title : e.program;
-            episodeLabel = name.isEmpty() ? "文字起こし中" : name;
-        } else {
+        if (e == null) {
+            rawText = "";
+            finalText = "";
+            program = "";
+            episodeTitle = "";
             episodeLabel = "文字起こし中";
+            return;
         }
+        rawText = e.rawTranscript == null ? "" : e.rawTranscript;
+        finalText = e.transcript == null ? "" : e.transcript;
+        program = e.program == null ? "" : e.program;
+        episodeTitle = e.title == null ? "" : e.title;
+        String name = !episodeTitle.isEmpty() ? episodeTitle : program;
+        episodeLabel = name.isEmpty() ? "文字起こし中" : name;
+        lastCommitted = "";
     }
 
     private void startForegroundForMode(boolean micOnly, String text) {
         Notification n = notification(text);
         if (Build.VERSION.SDK_INT >= 29) {
-            int type;
-            if (micOnly) {
-                type = ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE;
-            } else {
-                // SpeechRecognizer itself requires RECORD_AUDIO. Keep microphone WIU capability
-                // while the user switches from this app to the browser.
-                type = ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
-                        | ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE;
-            }
+            int type = micOnly
+                    ? ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+                    : ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+                    | ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE;
             startForeground(NOTIFY_ID, n, type);
         } else {
             startForeground(NOTIFY_ID, n);
@@ -148,7 +182,7 @@ public class TranscribeService extends Service {
     private int bufferBytes() {
         int min = AudioRecord.getMinBufferSize(
                 SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT);
-        return Math.max(min * 4, 32768);
+        return Math.max(min * 6, 49152);
     }
 
     private void beginInternal(int resultCode, Intent data) {
@@ -172,7 +206,7 @@ public class TranscribeService extends Service {
                     .setAudioPlaybackCaptureConfig(config)
                     .build();
 
-            beginRecorder("バックグラウンドで文字起こし中。ブラウザでradikoを再生してください。");
+            beginRecorder(statusForRunning());
         } catch (Exception e) {
             stopEverything("内部音声を開始できませんでした: " + e.getClass().getSimpleName(), "error");
         }
@@ -205,17 +239,25 @@ public class TranscribeService extends Service {
                 .build();
     }
 
+    private String statusForRunning() {
+        String speed = playbackSpeed >= 1.9f ? "2倍速補助モード" : playbackSpeed >= 1.4f ? "1.5倍速補助モード" : "標準モード";
+        return "バックグラウンドで文字起こし中（" + speed + "）。ブラウザで再生してください。";
+    }
+
     private void beginRecorder(String message) throws Exception {
         peak = 0;
         bytes = 0;
         reconnectCount = 0;
         permissionErrorRetries = 0;
         partialText = "";
+        firstAudibleAt = 0;
         lastAudibleAt = 0;
         running = true;
 
         acquireWakeLock();
-        if (currentEpisodeId > 0) store.updateTranscript(currentEpisodeId, finalText, "recording");
+        if (currentEpisodeId > 0) {
+            store.updateRecognition(currentEpisodeId, rawText, finalText, "recording", playbackSpeed);
+        }
 
         recorder.startRecording();
         startCaptureThread();
@@ -273,9 +315,9 @@ public class TranscribeService extends Service {
 
                         if (error == SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS) {
                             permissionErrorRetries++;
-                            if (permissionErrorRetries <= 3) {
+                            if (permissionErrorRetries <= 5) {
                                 flushPartialForRecovery();
-                                requestRecognizerRestart("権限状態を再確認して自動復旧しています…", 1000L);
+                                requestRecognizerRestart("権限状態を再確認して自動復旧しています…", 1200L);
                             } else {
                                 stopEverything("音声認識の権限を維持できませんでした。アプリを開いて再開してください。", "error");
                             }
@@ -284,7 +326,7 @@ public class TranscribeService extends Service {
 
                         permissionErrorRetries = 0;
                         flushPartialForRecovery();
-                        long delay = error == SpeechRecognizer.ERROR_RECOGNIZER_BUSY ? 1000L : 350L;
+                        long delay = error == SpeechRecognizer.ERROR_RECOGNIZER_BUSY ? 1100L : 400L;
                         requestRecognizerRestart("認識が途切れたため自動復旧しています…", delay);
                     }
 
@@ -293,7 +335,7 @@ public class TranscribeService extends Service {
                         touch();
                         permissionErrorRetries = 0;
                         appendBest(results);
-                        requestRecognizerRestart("次の認識区間へ接続中…", 200L);
+                        requestRecognizerRestart("次の認識区間へ接続中…", 220L);
                     }
 
                     @Override public void onPartialResults(Bundle partialResults) {
@@ -301,7 +343,7 @@ public class TranscribeService extends Service {
                         touch();
                         ArrayList<String> list = partialResults.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION);
                         if (list != null && !list.isEmpty()) {
-                            partialText = list.get(0).trim();
+                            partialText = store.applyCorrections(program, list.get(0).trim());
                             broadcast("文字起こし中。バックグラウンドでも継続します。", true);
                         }
                     }
@@ -319,7 +361,7 @@ public class TranscribeService extends Service {
                         if (!current()) return;
                         touch();
                         flushPartialForRecovery();
-                        requestRecognizerRestart("認識区間を更新しています…", 200L);
+                        requestRecognizerRestart("認識区間を更新しています…", 220L);
                     }
 
                     @Override public void onLanguageDetection(Bundle results) {}
@@ -329,12 +371,18 @@ public class TranscribeService extends Service {
                 ri.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM);
                 ri.putExtra(RecognizerIntent.EXTRA_LANGUAGE, "ja-JP");
                 ri.putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true);
+                ri.putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 5);
                 ri.putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE, readFd);
                 ri.putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE_CHANNEL_COUNT, 1);
                 ri.putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE_ENCODING, AudioFormat.ENCODING_PCM_16BIT);
                 ri.putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE_SAMPLING_RATE, SAMPLE_RATE);
                 ri.putExtra(RecognizerIntent.EXTRA_SEGMENTED_SESSION, RecognizerIntent.EXTRA_AUDIO_SOURCE);
                 ri.putExtra(RecognizerIntent.EXTRA_MASK_OFFENSIVE_WORDS, false);
+                ri.putStringArrayListExtra(RecognizerIntent.EXTRA_BIASING_STRINGS,
+                        store.getBiasStrings(program, episodeTitle));
+                ri.putExtra(RecognizerIntent.EXTRA_ENABLE_FORMATTING,
+                        RecognizerIntent.FORMATTING_OPTIMIZE_QUALITY);
+                ri.putExtra(RecognizerIntent.EXTRA_HIDE_PARTIAL_TRAILING_PUNCTUATION, true);
 
                 recognizerSessionStartedAt = System.currentTimeMillis();
                 lastRecognizerCallbackAt = recognizerSessionStartedAt;
@@ -342,7 +390,7 @@ public class TranscribeService extends Service {
 
                 if (recovery) broadcast("自動復旧しました。文字起こしを継続中です。", true);
             } catch (Exception e) {
-                if (running) requestRecognizerRestart("認識器を再接続しています…", 1300L);
+                if (running) requestRecognizerRestart("認識器を再接続しています…", 1400L);
             }
         });
     }
@@ -365,8 +413,10 @@ public class TranscribeService extends Service {
     private void appendBest(Bundle b) {
         ArrayList<String> list = b.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION);
         if (list == null || list.isEmpty()) return;
+        float[] confidence = b.getFloatArray(SpeechRecognizer.CONFIDENCE_SCORES);
+        String raw = store.chooseBestCandidate(program, list, confidence).trim();
         partialText = "";
-        commitText(list.get(0));
+        commitText(raw);
     }
 
     private void flushPartialForRecovery() {
@@ -377,44 +427,106 @@ public class TranscribeService extends Service {
 
     private void commitText(String raw) {
         if (raw == null) return;
-        String s = raw.trim();
-        if (s.isEmpty()) return;
-        if (s.equals(lastCommitted)) return;
+        String rawSegment = raw.trim();
+        if (rawSegment.isEmpty()) return;
 
-        // Avoid cumulative/overlapping results being appended twice across recognizer reconnects.
-        String tail = finalText.length() > 600 ? finalText.substring(finalText.length() - 600) : finalText;
-        if (tail.contains(s)) {
-            lastCommitted = s;
+        String corrected = store.applyCorrections(program, rawSegment).trim();
+        if (corrected.isEmpty() || corrected.equals(lastCommitted)) return;
+
+        String tail = compact(finalText.length() > 800
+                ? finalText.substring(finalText.length() - 800) : finalText);
+        String compactCorrected = compact(corrected);
+        if (!compactCorrected.isEmpty() && tail.contains(compactCorrected)) {
+            lastCommitted = corrected;
             return;
         }
 
-        int max = Math.min(Math.min(finalText.length(), s.length()), 160);
-        int overlap = 0;
-        for (int k = max; k >= 8; k--) {
-            if (finalText.endsWith(s.substring(0, k))) {
-                overlap = k;
-                break;
-            }
-        }
-        String append = s.substring(overlap).trim();
-        if (append.isEmpty()) {
-            lastCommitted = s;
+        int overlap = findOverlap(compact(finalText), compactCorrected);
+        String append = corrected;
+        if (overlap >= 8 && overlap < compactCorrected.length()) {
+            int cut = approximateCut(corrected, overlap);
+            if (cut > 0 && cut < corrected.length()) append = corrected.substring(cut).trim();
+        } else if (overlap >= compactCorrected.length()) {
+            lastCommitted = corrected;
             return;
         }
 
-        if (!finalText.isEmpty() && !finalText.endsWith("\n")) finalText += "\n";
-        finalText += append;
-        lastCommitted = s;
-        if (currentEpisodeId > 0) store.updateTranscript(currentEpisodeId, finalText, "recording");
+        if (append.isEmpty()) return;
+        appendRaw(rawSegment);
+        appendReadable(append);
+        lastCommitted = corrected;
+
+        if (currentEpisodeId > 0) {
+            store.updateRecognition(currentEpisodeId, rawText, finalText, "recording", playbackSpeed);
+        }
         broadcast("文字起こし中。自動保存しています。", true);
+    }
+
+    private void appendRaw(String segment) {
+        if (!rawText.isEmpty() && !rawText.endsWith("\n")) rawText += "\n";
+        rawText += segment;
+    }
+
+    private void appendReadable(String text) {
+        text = text.replaceAll("[ \\t]+", " ").trim();
+        if (text.isEmpty()) return;
+        if (!endsWithSentencePunctuation(text) && text.length() >= 8) text += "。";
+
+        String[] pieces = text.split("(?<=[。！？!?])");
+        for (String piece : pieces) {
+            piece = piece.trim();
+            if (piece.isEmpty()) continue;
+            int paraLen = currentParagraphLength();
+            if (!finalText.isEmpty()) {
+                if (paraLen >= 110) {
+                    if (!finalText.endsWith("\n\n")) finalText += "\n\n";
+                } else if (!finalText.endsWith("\n") && !finalText.endsWith("。")
+                        && !finalText.endsWith("！") && !finalText.endsWith("？")) {
+                    finalText += " ";
+                }
+            }
+            finalText += piece;
+        }
+    }
+
+    private int currentParagraphLength() {
+        int i = finalText.lastIndexOf("\n\n");
+        return i < 0 ? finalText.length() : finalText.length() - i - 2;
+    }
+
+    private boolean endsWithSentencePunctuation(String s) {
+        if (s.isEmpty()) return false;
+        char c = s.charAt(s.length() - 1);
+        return c == '。' || c == '！' || c == '？' || c == '!' || c == '?' || c == '.';
+    }
+
+    private String compact(String s) {
+        return s == null ? "" : s.replaceAll("[\\s、。！？!?，,.・：；]+", "");
+    }
+
+    private int findOverlap(String a, String b) {
+        int max = Math.min(Math.min(a.length(), b.length()), 180);
+        for (int k = max; k >= 8; k--) {
+            if (a.endsWith(b.substring(0, k))) return k;
+        }
+        return 0;
+    }
+
+    private int approximateCut(String original, int compactChars) {
+        int seen = 0;
+        for (int i = 0; i < original.length(); i++) {
+            char c = original.charAt(i);
+            if (!Character.isWhitespace(c) && "、。！？!?，,.・：；".indexOf(c) < 0) seen++;
+            if (seen >= compactChars) return i + 1;
+        }
+        return original.length();
     }
 
     private String displayText() {
         String p = partialText == null ? "" : partialText.trim();
         if (p.isEmpty()) return finalText;
         if (finalText.isEmpty()) return p;
-        if (finalText.endsWith(p)) return finalText;
-        return finalText + "\n" + p;
+        return finalText + "\n\n…" + p;
     }
 
     private void startCaptureThread() {
@@ -439,37 +551,43 @@ public class TranscribeService extends Service {
 
                     peak = localPeak;
                     bytes += n * 2L;
-                    if (localPeak >= 40) lastAudibleAt = System.currentTimeMillis();
+                    long now = System.currentTimeMillis();
+                    if (localPeak >= 35) {
+                        if (firstAudibleAt == 0) firstAudibleAt = now;
+                        lastAudibleAt = now;
+                    }
 
                     OutputStream target;
                     synchronized (pipeLock) { target = pipeOut; }
                     if (target != null) {
-                        try { target.write(out, 0, n * 2); }
-                        catch (IOException expectedDuringReconnect) {
-                            if (running) try { Thread.sleep(20L); } catch (InterruptedException ignored) {}
+                        try {
+                            target.write(out, 0, n * 2);
+                        } catch (IOException expectedDuringReconnect) {
+                            if (running) sleepQuietly(20L);
                         }
+                    } else {
+                        sleepQuietly(20L);
                     }
 
-                    long now = System.currentTimeMillis();
                     if (now - lastStatus > 1000L) {
                         String s;
                         if (bytes > SAMPLE_RATE * 2L * 6L && peak < 20) {
                             s = mode.equals("mic")
                                     ? "マイク入力がほぼ無音です。スピーカー音量を確認してください。"
-                                    : "内部音声がほぼ無音です。ブラウザで再生しているか確認してください。";
+                                    : "内部音声がほぼ無音です。ブラウザで再生中か確認してください。";
                         } else if (restartScheduled) {
-                            s = "音声取得は継続中。認識器を自動復旧しています…";
+                            s = "音声は取得中です。認識器を自動復旧しています…";
                         } else {
-                            s = "バックグラウンドで文字起こし中。自動保存しています。";
+                            s = statusForRunning();
                         }
                         broadcast(s, true);
-                        updateNotification(episodeLabel + " • " + (restartScheduled ? "自動復旧中" : "文字起こし中"));
+                        updateNotification(s);
                         lastStatus = now;
                     }
                 } catch (Exception e) {
                     if (running) {
                         broadcast("音声入力を復旧しています…", true);
-                        try { Thread.sleep(150L); } catch (InterruptedException ignored) {}
+                        sleepQuietly(120L);
                     }
                 }
             }
@@ -477,18 +595,8 @@ public class TranscribeService extends Service {
         captureThread.start();
     }
 
-    private void acquireWakeLock() {
-        try {
-            PowerManager pm = (PowerManager)getSystemService(POWER_SERVICE);
-            wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "RadikoTranscriber:Transcribing");
-            wakeLock.setReferenceCounted(false);
-            wakeLock.acquire();
-        } catch (Exception ignored) {}
-    }
-
-    private void releaseWakeLock() {
-        try { if (wakeLock != null && wakeLock.isHeld()) wakeLock.release(); } catch (Exception ignored) {}
-        wakeLock = null;
+    private void sleepQuietly(long ms) {
+        try { Thread.sleep(ms); } catch (InterruptedException ignored) {}
     }
 
     private void closePipe() {
@@ -510,13 +618,24 @@ public class TranscribeService extends Service {
         }
     }
 
-    private void stopEverything(String message, String finalStatus) {
+    private void acquireWakeLock() {
+        try {
+            PowerManager pm = (PowerManager)getSystemService(POWER_SERVICE);
+            wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "radiko-transcriber:recognition");
+            wakeLock.acquire(6 * 60 * 60 * 1000L);
+        } catch (Exception ignored) {}
+    }
+
+    private void releaseWakeLock() {
+        try { if (wakeLock != null && wakeLock.isHeld()) wakeLock.release(); } catch (Exception ignored) {}
+        wakeLock = null;
+    }
+
+    private void stopEverything(String message, String statusValue) {
         if (running) flushPartialForRecovery();
         running = false;
         restartScheduled = false;
         mainHandler.removeCallbacks(watchdog);
-
-        if (currentEpisodeId > 0) store.updateTranscript(currentEpisodeId, finalText, finalStatus);
 
         closePipe();
         try {
@@ -532,6 +651,10 @@ public class TranscribeService extends Service {
         projection = null;
         releaseWakeLock();
 
+        if (currentEpisodeId > 0) {
+            store.updateRecognition(currentEpisodeId, rawText, finalText, statusValue, playbackSpeed);
+        }
+
         broadcast(message, false);
         try { stopForeground(STOP_FOREGROUND_REMOVE); } catch (Exception ignored) {}
         stopSelf();
@@ -546,6 +669,7 @@ public class TranscribeService extends Service {
         i.putExtra("mode", mode);
         i.putExtra("reconnects", reconnectCount);
         i.putExtra("episodeId", currentEpisodeId);
+        i.putExtra("playbackSpeed", playbackSpeed);
         i.putExtra("text", displayText());
         sendBroadcast(i);
     }
@@ -553,30 +677,29 @@ public class TranscribeService extends Service {
     private void createChannel() {
         NotificationManager nm = getSystemService(NotificationManager.class);
         NotificationChannel ch = new NotificationChannel(
-                CHANNEL, "バックグラウンド文字起こし", NotificationManager.IMPORTANCE_LOW);
-        ch.setDescription("radikoの文字起こし実行中に表示します");
+                CHANNEL, "ラジオ文字起こし", NotificationManager.IMPORTANCE_LOW);
+        ch.setDescription("バックグラウンド文字起こしの状態");
         nm.createNotificationChannel(ch);
     }
 
     private Notification notification(String text) {
-        Intent open = new Intent(this, MainActivity.class);
-        open.addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP | Intent.FLAG_ACTIVITY_CLEAR_TOP);
-        PendingIntent openPi = PendingIntent.getActivity(this, 1, open,
+        Intent stop = new Intent(this, TranscribeService.class);
+        stop.setAction(ACTION_STOP);
+        PendingIntent stopPi = PendingIntent.getService(this, 2, stop,
                 PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
 
-        Intent stop = new Intent(this, TranscribeService.class).setAction(ACTION_STOP);
-        PendingIntent stopPi = PendingIntent.getService(this, 2, stop,
+        Intent open = new Intent(this, MainActivity.class);
+        PendingIntent openPi = PendingIntent.getActivity(this, 3, open,
                 PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
 
         return new NotificationCompat.Builder(this, CHANNEL)
                 .setSmallIcon(android.R.drawable.ic_btn_speak_now)
-                .setContentTitle("radiko文字起こし • 実行中")
+                .setContentTitle(episodeLabel)
                 .setContentText(text)
                 .setContentIntent(openPi)
-                .addAction(android.R.drawable.ic_menu_close_clear_cancel, "停止して保存", stopPi)
+                .addAction(android.R.drawable.ic_media_pause, "停止して保存", stopPi)
                 .setOngoing(true)
                 .setOnlyAlertOnce(true)
-                .setCategory(NotificationCompat.CATEGORY_SERVICE)
                 .build();
     }
 
@@ -584,24 +707,10 @@ public class TranscribeService extends Service {
         getSystemService(NotificationManager.class).notify(NOTIFY_ID, notification(text));
     }
 
-    @Override public void onTaskRemoved(Intent rootIntent) {
-        if (running) updateNotification(episodeLabel + " • バックグラウンドで継続中");
-        super.onTaskRemoved(rootIntent);
-    }
-
     @Override public void onDestroy() {
         mainHandler.removeCallbacks(watchdog);
-        if (running) {
-            running = false;
-            if (currentEpisodeId > 0) store.updateTranscript(currentEpisodeId, finalText, "interrupted");
-            closePipe();
-            try { if (recorder != null) { recorder.stop(); recorder.release(); } } catch (Exception ignored) {}
-            recorder = null;
-            destroyRecognizerOnly();
-            try { if (projection != null) projection.stop(); } catch (Exception ignored) {}
-            projection = null;
-            releaseWakeLock();
-        }
+        if (running) stopEverything("サービスを終了しました。保存済みです。", "interrupted");
+        releaseWakeLock();
         super.onDestroy();
     }
 
