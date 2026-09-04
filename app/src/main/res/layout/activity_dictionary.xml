@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android" android:layout_width="match_parent" android:layout_height="match_parent" android:background="#F4F5F7">
+    <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical" android:padding="16dp">
+        <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:text="修正辞書" android:textSize="24sp" android:textStyle="bold"/>
+        <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="4dp" android:text="誤認識 → 正しい表記を番組ごとに管理します。優先度が高いほど候補選択で強く効きます。" android:textColor="#6B7280" android:textSize="12sp"/>
+        <Spinner android:id="@+id/dictProgram" android:layout_width="match_parent" android:layout_height="48dp" android:layout_marginTop="10dp"/>
+        <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="8dp" android:background="@drawable/panel" android:orientation="vertical">
+            <EditText android:id="@+id/dictWrong" android:layout_width="match_parent" android:layout_height="wrap_content" android:hint="誤認識  例：中田詩織" android:singleLine="true"/>
+            <EditText android:id="@+id/dictCorrect" android:layout_width="match_parent" android:layout_height="wrap_content" android:hint="正しい表記  例：永田詩央里" android:singleLine="true"/>
+            <Button android:id="@+id/dictAdd" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="辞書に追加"/>
+        </LinearLayout>
+        <LinearLayout android:id="@+id/dictContainer" android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical" android:layout_marginTop="10dp"/>
+        <Space android:layout_width="match_parent" android:layout_height="24dp"/>
+    </LinearLayout>
+</ScrollView>
