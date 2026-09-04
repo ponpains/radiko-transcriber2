@@ -1,0 +1,28 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'com.example.radikotranscriber'
+    compileSdk 35
+
+    defaultConfig {
+        applicationId "com.example.radikotranscriber"
+        minSdk 33
+        targetSdk 35
+        versionCode 6
+        versionName "0.6"
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+        }
+    }
+}
+
+dependencies {
+    implementation 'androidx.appcompat:appcompat:1.7.0'
+    implementation 'androidx.activity:activity:1.10.1'
+    implementation 'androidx.core:core:1.15.0'
+}
