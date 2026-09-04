@@ -32,12 +32,19 @@ public class MainActivity extends AppCompatActivity {
             String s = intent.getStringExtra("status");
             String text = intent.getStringExtra("text");
             int peak = intent.getIntExtra("peak", 0);
+            int reconnects = intent.getIntExtra("reconnects", 0);
             boolean running = intent.getBooleanExtra("running", false);
             String mode = intent.getStringExtra("mode");
 
             if (s != null) status.setText(s);
-            meter.setText(("mic".equals(mode) ? "マイク入力レベル: " : "内部音声レベル: ") + peak);
-            if (text != null) transcript.setText(text);
+            String meterText = ("mic".equals(mode) ? "マイク入力レベル: " : "内部音声レベル: ") + peak;
+            if (running) meterText += "　自動再接続: " + reconnects + "回";
+            meter.setText(meterText);
+
+            if (text != null && !text.contentEquals(transcript.getText())) {
+                transcript.setText(text);
+                transcript.setSelection(transcript.length());
+            }
 
             internalStartButton.setEnabled(!running);
             micStartButton.setEnabled(!running);
@@ -67,7 +74,7 @@ public class MainActivity extends AppCompatActivity {
                 service.putExtra("resultCode", result.getResultCode());
                 service.putExtra("projectionData", result.getData());
                 ContextCompat.startForegroundService(this, service);
-                status.setText("内部音声を準備中…");
+                status.setText("内部音声を準備中… 許可後にブラウザでradikoを再生してください。");
                 pendingMode = MODE_NONE;
             });
 
@@ -161,7 +168,7 @@ public class MainActivity extends AppCompatActivity {
                 Intent i = new Intent(Intent.ACTION_VIEW, uri);
                 i.setPackage(pkg);
                 startActivity(i);
-                status.setText("ブラウザで開きました。内部音声モードの入力レベルを確認してください。");
+                status.setText("ブラウザで開きました。再生後、内部音声レベルが動けば取得できています。");
                 return;
             } catch (Exception ignored) {}
         }
