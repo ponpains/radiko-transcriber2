@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-permission android:name="android.permission.INTERNET"/>
     <uses-permission android:name="android.permission.RECORD_AUDIO"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION"/>
@@ -17,6 +18,7 @@
         android:theme="@style/Theme.RadikoTranscriber"
         android:usesCleartextTraffic="false">
 
+        <activity android:name=".InAppBrowserActivity" android:exported="false"/>
         <activity android:name=".ArchiveActivity" android:exported="false"/>
         <activity android:name=".EpisodeDetailActivity" android:exported="false"/>
         <activity android:name=".DictionaryActivity" android:exported="false"/>
@@ -28,6 +30,16 @@
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
         </activity>
+
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths"/>
+        </provider>
 
         <service
             android:name=".TranscribeService"
