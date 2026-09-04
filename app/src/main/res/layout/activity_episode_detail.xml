@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent" android:layout_height="match_parent" android:background="#F4F5F7" android:fillViewport="true">
+    <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical" android:padding="16dp">
+        <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:text="回の詳細" android:textSize="24sp" android:textStyle="bold" android:textColor="#111827"/>
+        <TextView android:id="@+id/detailMeta" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="4dp" android:textColor="#6B7280" android:textSize="12sp"/>
+
+        <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="12dp" android:background="@drawable/panel" android:orientation="vertical">
+            <EditText android:id="@+id/detailProgram" android:layout_width="match_parent" android:layout_height="wrap_content" android:hint="番組名" android:singleLine="true"/>
+            <EditText android:id="@+id/detailTitle" android:layout_width="match_parent" android:layout_height="wrap_content" android:hint="回名" android:singleLine="true"/>
+            <EditText android:id="@+id/detailUrl" android:layout_width="match_parent" android:layout_height="wrap_content" android:hint="URL" android:singleLine="true" android:inputType="textUri"/>
+            <Button android:id="@+id/detailOpen" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="この回をブラウザで開く"/>
+        </LinearLayout>
+
+        <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="12dp" android:background="@drawable/panel" android:orientation="vertical">
+            <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:text="全文" android:textSize="18sp" android:textStyle="bold"/>
+            <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="horizontal">
+                <EditText android:id="@+id/detailSearch" android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1" android:hint="この回の中を検索" android:singleLine="true"/>
+                <Button android:id="@+id/detailFindNext" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="次へ"/>
+            </LinearLayout>
+            <EditText android:id="@+id/detailTranscript" android:layout_width="match_parent" android:layout_height="420dp" android:layout_marginTop="6dp" android:background="#FFFFFF" android:gravity="top|start" android:inputType="textMultiLine" android:padding="12dp" android:scrollbars="vertical" android:nestedScrollingEnabled="true" android:textSize="15sp"/>
+            <Button android:id="@+id/detailLearn" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="この修正を番組辞書に学習"/>
+            <Button android:id="@+id/detailCopy" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="タイムスタンプ付きでコピー"/>
+        </LinearLayout>
+
+        <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="12dp" android:background="@drawable/panel" android:orientation="vertical">
+            <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:text="あとで使う情報" android:textSize="18sp" android:textStyle="bold"/>
+            <EditText android:id="@+id/detailTags" android:layout_width="match_parent" android:layout_height="wrap_content" android:hint="タグ  例：秋田, メール, ライブ" android:singleLine="true"/>
+            <EditText android:id="@+id/detailKeyPoints" android:layout_width="match_parent" android:layout_height="120dp" android:gravity="top|start" android:hint="この回の要点・印象的な発言" android:inputType="textMultiLine"/>
+            <EditText android:id="@+id/detailNotes" android:layout_width="match_parent" android:layout_height="120dp" android:gravity="top|start" android:hint="自由メモ" android:inputType="textMultiLine"/>
+            <Button android:id="@+id/detailSave" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="変更を保存"/>
+        </LinearLayout>
+
+        <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="12dp" android:background="@drawable/panel" android:orientation="vertical">
+            <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:text="タイムライン" android:textSize="18sp" android:textStyle="bold"/>
+            <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:text="段落ごとの再生位置です。URLに開始位置 t= がある回はそこから加算します。" android:textSize="12sp" android:textColor="#6B7280"/>
+            <LinearLayout android:id="@+id/timelineContainer" android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical" android:layout_marginTop="6dp"/>
+        </LinearLayout>
+
+        <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="12dp" android:background="@drawable/panel" android:orientation="vertical">
+            <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:text="この番組の修正辞書" android:textSize="18sp" android:textStyle="bold"/>
+            <TextView android:id="@+id/detailCorrections" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="6dp" android:textSize="13sp"/>
+            <Button android:id="@+id/detailDictionary" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="辞書を管理"/>
+        </LinearLayout>
+
+        <Button android:id="@+id/detailDelete" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="14dp" android:text="この回を削除"/>
+        <Space android:layout_width="match_parent" android:layout_height="24dp"/>
+    </LinearLayout>
+</ScrollView>
