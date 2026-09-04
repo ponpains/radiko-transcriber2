@@ -17,6 +17,7 @@
         android:theme="@style/Theme.RadikoTranscriber"
         android:usesCleartextTraffic="false">
 
+        <activity android:name=".ArchiveActivity" android:exported="false"/>
         <activity android:name=".EpisodeDetailActivity" android:exported="false"/>
         <activity android:name=".DictionaryActivity" android:exported="false"/>
         <activity android:name=".ProgramActivity" android:exported="false"/>
