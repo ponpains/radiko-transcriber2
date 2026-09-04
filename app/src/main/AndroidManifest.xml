@@ -5,10 +5,17 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE"/>
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+    <uses-permission android:name="android.permission.WAKE_LOCK"/>
+
+    <queries>
+        <intent>
+            <action android:name="android.speech.RecognitionService"/>
+        </intent>
+    </queries>
 
     <application
         android:allowBackup="true"
-        android:label="radiko文字起こし"
+        android:label="ラジオ文字起こし"
         android:theme="@style/Theme.RadikoTranscriber"
         android:usesCleartextTraffic="false">
 
@@ -24,6 +31,7 @@
         <service
             android:name=".TranscribeService"
             android:exported="false"
+            android:stopWithTask="false"
             android:foregroundServiceType="mediaProjection|microphone"/>
     </application>
 </manifest>
