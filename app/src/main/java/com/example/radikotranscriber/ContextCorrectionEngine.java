@@ -17,6 +17,7 @@ public final class ContextCorrectionEngine {
         // Program-specific context always runs before generic Japanese homophones.
         s = KerekereContextProfile.refine(program, previousText, s);
         s = KerekereContextBoost.refine(program, previousText, s);
+        s = KerekereProgramStructure.refine(program, previousText, s);
         String context = tail(previousText, 420) + " " + s;
 
         if (containsAny(context, "ツアー", "ライブ", "ステージ", "チケット", "体育館", "アリーナ")) {
