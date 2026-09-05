@@ -17,11 +17,12 @@ public class RadikoApplication extends Application {
 
     @Override public void onCreate() {
         super.onCreate();
-        worker.execute(() -> {
-            int removed = CorrectionSanitizer.sanitize(this);
-            new DiagnosticStore(this).log(-1L, "correction_sanitizer",
-                    "removed=" + removed + ";singlePass=true;guard=v16");
-        });
+        // This is intentionally synchronous and small. The diagnostic pack showed that unsafe
+        // legacy rules could alter recognition from the first candidate of a session, so cleanup
+        // must finish before MainActivity/TranscribeService can be used.
+        int removed = CorrectionSanitizer.sanitize(this);
+        new DiagnosticStore(this).log(-1L, "correction_sanitizer",
+                "removed=" + removed + ";singlePass=true;guard=v16");
 
         receiver = new BroadcastReceiver() {
             @Override public void onReceive(Context context, Intent intent) {
