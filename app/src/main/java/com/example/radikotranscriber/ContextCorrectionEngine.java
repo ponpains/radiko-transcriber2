@@ -10,8 +10,8 @@ import java.util.ArrayList;
  * Conservative local post-correction.
  *
  * Order matters: when the episode is "けれけれ", the researched program profile gets first say,
- * then only generic context-gated homophones are considered. This is not a generative model and
- * never invents words that were absent from the recognition result.
+ * then only generic context-gated corrections are considered. This is not a generative model and
+ * never fills an unknown span merely because a sentence would sound plausible.
  */
 public final class ContextCorrectionEngine {
     private ContextCorrectionEngine() {}
@@ -22,18 +22,28 @@ public final class ContextCorrectionEngine {
 
         // Program-specific context has priority over generic Japanese rules.
         s = KerekereContextProfile.refine(program, previousText, s);
+        String context = tail(previousText, 360) + " " + s;
 
         // Generic context-gated homophones. These never globally rewrite an ordinary word.
-        if (containsAny(s, "ツアー", "ライブ", "ステージ", "チケット", "体育館", "アリーナ")) {
+        if (containsAny(context, "ツアー", "ライブ", "ステージ", "チケット", "体育館", "アリーナ")) {
             s = s.replace("昼公園", "昼公演").replace("夜公園", "夜公演");
             s = replaceBounded(s, "公園", "公演",
                     new String[]{"ツアー","ライブ","チケット","ステージ","ファイナル","アリーナ"});
         }
-        if (containsAny(s, "ピーマン", "野菜", "苗", "収穫")) {
+        if (containsAny(context, "ピーマン", "野菜", "苗", "収穫")) {
             s = s.replace("初就活", "初収穫").replace("初 就活", "初収穫");
         }
         if (s.contains("ペット")) {
             s = s.replace("ペットを買ったことがない", "ペットを飼ったことがない");
+        }
+
+        // Observed in the v0.16 diagnostic: "カーテンを開けて外のるを確認しました".
+        // With the surrounding 寝坊/朝/カーテン context, "明るさ" is high-confidence enough to
+        // recover; outside that context the odd phrase is left untouched.
+        if (containsAny(context, "カーテン", "寝坊", "朝です", "起きたら")
+                && containsAny(s, "外のるを確認", "外の るを確認")) {
+            s = s.replace("外のるを確認", "外の明るさを確認")
+                    .replace("外の るを確認", "外の明るさを確認");
         }
 
         return cleanupSpacing(s);
@@ -135,6 +145,11 @@ public final class ContextCorrectionEngine {
     private static String appendTail(String previous, String line) {
         String s = safe(previous) + "\n" + safe(line);
         return s.length() > 500 ? s.substring(s.length() - 500) : s;
+    }
+
+    private static String tail(String text, int max) {
+        String s = safe(text);
+        return s.length() <= max ? s : s.substring(s.length() - max);
     }
 
     private static String cleanupSpacing(String s) {
