@@ -45,3 +45,4 @@ dependencies {
 apply from: 'v018-source-patch.gradle'
 apply from: 'v018-compile-fix.gradle'
 apply from: 'v019-recognition-fix.gradle'
+apply from: 'v019-format-fine-tune.gradle'
