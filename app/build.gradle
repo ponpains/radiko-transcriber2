@@ -43,3 +43,4 @@ dependencies {
 }
 
 apply from: 'v018-source-patch.gradle'
+apply from: 'v018-compile-fix.gradle'
