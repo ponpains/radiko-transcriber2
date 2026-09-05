@@ -59,7 +59,6 @@ public class DiagnosticStore extends SQLiteOpenHelper {
 
     private void pruneOld() {
         try {
-            // Keep enough history for repeated tests, but don't let internal logs grow forever.
             long cutoff = System.currentTimeMillis() - 45L * 24L * 60L * 60L * 1000L;
             getWritableDatabase().delete("events", "at_ms<?", new String[]{String.valueOf(cutoff)});
         } catch (Exception ignored) {}
@@ -68,7 +67,7 @@ public class DiagnosticStore extends SQLiteOpenHelper {
     public String exportPack(EpisodeStore store, int maxEpisodes) {
         try {
             JSONObject root = new JSONObject();
-            root.put("format", "radiko-transcriber-diagnostics-v1");
+            root.put("format", "radiko-transcriber-diagnostics-v2");
             root.put("generatedAt", iso(System.currentTimeMillis()));
             root.put("purpose", "assistant-debugging");
             root.put("audioIncluded", false);
@@ -109,6 +108,7 @@ public class DiagnosticStore extends SQLiteOpenHelper {
                 o.put("rawTranscript", e.rawTranscript);
                 o.put("autoTranscript", e.autoTranscript);
                 o.put("finalTranscript", e.transcript);
+                o.put("formatLearning", FormatLearningStore.toJson(appContext, e.program));
 
                 JSONArray segs = new JSONArray();
                 for (EpisodeStore.Segment s : store.listSegments(e.id)) {
@@ -138,7 +138,7 @@ public class DiagnosticStore extends SQLiteOpenHelper {
             root.put("episodes", episodes);
             return root.toString(2);
         } catch (Exception e) {
-            return "{\"format\":\"radiko-transcriber-diagnostics-v1\",\"error\":\"export_failed\"}";
+            return "{\"format\":\"radiko-transcriber-diagnostics-v2\",\"error\":\"export_failed\"}";
         }
     }
 
