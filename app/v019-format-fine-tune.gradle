@@ -1,0 +1,24 @@
+// Fine-tune the sentence formatter after the main v0.19 source patch.
+tasks.named("preBuild").configure {
+    doLast {
+        File formatter = file("src/main/java/com/example/radikotranscriber/TranscriptSentenceFormatter.java")
+        String f = formatter.getText("UTF-8")
+        f = f.replace(
+                '            "なんですか", "なんでしょうか", "いいですね", "いいと思います"',
+                '            "なんですか", "なんでしょうか", "いいですね", "いいと思います", "です", "ます"')
+        f = f.replace(
+                '''            boolean longClause = compactLength(left) >= 30;
+
+            if (strong || (soft && newStart && longClause)) {''',
+                '''            boolean longClause = compactLength(left) >= 30;
+            String rightTrimmed = trimLeadingSymbols(right);
+            boolean continuation = startsWithAny(rightTrimmed,
+                    new String[]{"ね", "よ", "けど", "けれど", "けれども", "が", "し", "ので", "から", "って", "とか"});
+            boolean barePoliteEnding = left.endsWith("です") || left.endsWith("ます");
+            boolean strongBoundary = strong && !continuation
+                    && (!barePoliteEnding || newStart || compactLength(left) >= 24);
+
+            if (strongBoundary || (soft && newStart && longClause)) {''')
+        formatter.write(f, "UTF-8")
+    }
+}
