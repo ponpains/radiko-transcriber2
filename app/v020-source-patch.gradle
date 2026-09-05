@@ -1,0 +1,339 @@
+// v0.20 stabilization + show-structure patch.
+// Based on the v0.19 #8 diagnostic: replay was correct in principle but could rewind tens of
+// seconds and then burst-feed it far faster than real time, producing NETWORK/disconnect loops.
+
+def replaceRange020 = { String text, String startMarker, String endMarker, String replacement, String label ->
+    int a = text.indexOf(startMarker)
+    if (a < 0) throw new GradleException("v0.20 patch: start marker not found: " + label)
+    int b = text.indexOf(endMarker, a)
+    if (b < 0) throw new GradleException("v0.20 patch: end marker not found: " + label)
+    return text.substring(0, a) + replacement + text.substring(b)
+}
+
+tasks.named("preBuild").configure {
+    doLast {
+        File serviceFile = file("src/main/java/com/example/radikotranscriber/TranscribeService.java")
+        String s = serviceFile.getText("UTF-8")
+
+        if (!s.contains("REPLAY_CATCHUP_RATE")) {
+            s = s.replace(
+                    "    private volatile int lastRotationReconnectCount = 0;\n",
+                    "    private volatile int lastRotationReconnectCount = 0;\n" +
+                    "    private static final double REPLAY_CATCHUP_RATE = 1.20;\n" +
+                    "    private volatile long replayCatchupUntilOffset = -1L;\n" +
+                    "    private volatile int consecutiveNetworkErrors = 0;\n" +
+                    "    private volatile long lastNetworkErrorAt = 0L;\n" +
+                    "    private volatile long lastFeedDiagnosticAt = 0L;\n" +
+                    "    private volatile long feedDiagnosticStartOffset = -1L;\n" +
+                    "    private volatile long feedDiagnosticEndOffset = 0L;\n" +
+                    "    private volatile long feedDiagnosticEncodedBytes = 0L;\n")
+        }
+        s = s.replace(
+                "        lastRotationReconnectCount = 0;\n        frozenDurationMs = 0L;",
+                "        lastRotationReconnectCount = 0;\n" +
+                "        replayCatchupUntilOffset = -1L;\n" +
+                "        consecutiveNetworkErrors = 0;\n" +
+                "        lastNetworkErrorAt = 0L;\n" +
+                "        lastFeedDiagnosticAt = 0L;\n" +
+                "        feedDiagnosticStartOffset = -1L;\n" +
+                "        feedDiagnosticEndOffset = 0L;\n" +
+                "        feedDiagnosticEncodedBytes = 0L;\n" +
+                "        frozenDurationMs = 0L;")
+
+        s = s.replace(
+                "            loadEpisode(intent.getLongExtra(\"episodeId\", -1L));",
+                "            loadEpisode(intent.getLongExtra(\"episodeId\", -1L));\n" +
+                "            appendEpisodePageContext(intent);")
+        if (!s.contains("private void appendEpisodePageContext(Intent intent)")) {
+            String contextMethod = '''    private void appendEpisodePageContext(Intent intent) {
+        if (intent == null) return;
+        String page = intent.getStringExtra("episodeContext");
+        if (page == null) return;
+        page = page.replace('\n', ' ').replace('\r', ' ').replaceAll("[ \\t]{2,}", " ").trim();
+        if (page.length() > 1200) page = page.substring(0, 1200);
+        if (page.isEmpty()) return;
+        episodeHints = (episodeHints + " " + page).trim();
+        diag("episode_context_loaded", "chars=" + page.length()
+                + ";structure=" + KerekereProgramStructure.VERSION);
+    }
+
+'''
+            s = s.replace("    private void startForegroundForMode(boolean micOnly, String text) {",
+                    contextMethod + "    private void startForegroundForMode(boolean micOnly, String text) {")
+        }
+
+        if (!s.contains("KerekereProgramStructure.scoreCandidate")) {
+            s = s.replace(
+                    "            score += KerekereContextBoost.scoreCandidate(program, c, finalText);",
+                    "            score += KerekereContextBoost.scoreCandidate(program, c, finalText);\n" +
+                    "            score += KerekereProgramStructure.scoreCandidate(program, c, finalText,\n" +
+                    "                    episodeTitle + \" \" + episodeHints);")
+        }
+
+        s = s.replace(
+                "                                    requestReplayFromSafe(\"startup_disconnect_no_ready\", 3200L);\n                                    requestRecognizerRestart(\"認識器の起動をやり直しています…\", 900L, false);",
+                "                                    requestRecognizerRestart(\"認識器の起動をやり直しています…\", 1100L, false);")
+
+        String oldDelay = '''                        long delay;
+                        if (error == SpeechRecognizer.ERROR_RECOGNIZER_BUSY) delay = 1400L;
+                        else if (error == SpeechRecognizer.ERROR_SERVER_DISCONNECTED
+                                || error == SpeechRecognizer.ERROR_SERVER) delay = 2000L;
+                        else if (error == SpeechRecognizer.ERROR_NO_MATCH
+                                || error == SpeechRecognizer.ERROR_SPEECH_TIMEOUT) delay = 800L;
+                        else delay = 1000L;
+                        requestRecognizerRestart("認識が途切れたため安全位置から再認識しています…", delay, false);'''
+        String newDelay = '''                        long delay;
+                        if (error == SpeechRecognizer.ERROR_NETWORK) {
+                            long networkNow = System.currentTimeMillis();
+                            if (lastNetworkErrorAt > 0L && networkNow - lastNetworkErrorAt < 15000L)
+                                consecutiveNetworkErrors++;
+                            else consecutiveNetworkErrors = 1;
+                            lastNetworkErrorAt = networkNow;
+                            int step = Math.min(3, Math.max(0, consecutiveNetworkErrors - 1));
+                            delay = Math.min(8000L, 1200L * (1L << step));
+                            diag("network_backoff", "count=" + consecutiveNetworkErrors
+                                    + ";delayMs=" + delay + ";activeGeneration=" + recognizerGeneration
+                                    + ";feedOffset=" + feederReadOffset);
+                        } else if (error == SpeechRecognizer.ERROR_RECOGNIZER_BUSY) delay = 1600L;
+                        else if (error == SpeechRecognizer.ERROR_SERVER_DISCONNECTED
+                                || error == SpeechRecognizer.ERROR_SERVER) delay = 2500L;
+                        else if (error == SpeechRecognizer.ERROR_NO_MATCH
+                                || error == SpeechRecognizer.ERROR_SPEECH_TIMEOUT) delay = 900L;
+                        else delay = 1200L;
+                        requestRecognizerRestart("認識が途切れたため安全位置から再認識しています…", delay, false);'''
+        if (!s.contains(oldDelay)) throw new GradleException("v0.20 patch: network delay block missing")
+        s = s.replace(oldDelay, newDelay)
+
+        s = s.replace(
+                "        generationHadResult = true;\n        long margin = rawBytesForMs(600L);",
+                "        generationHadResult = true;\n" +
+                "        consecutiveNetworkErrors = 0;\n" +
+                "        lastNetworkErrorAt = 0L;\n" +
+                "        long margin = rawBytesForMs(600L);")
+
+        String replayMethod = '''    private void requestReplayFromSafe(String reason, long overlapMs) {
+        long boundedMs = Math.max(600L, Math.min(5000L, overlapMs));
+        long anchor = Math.max(0L, feederReadOffset);
+        long base = Math.max(0L, anchor - rawBytesForMs(boundedMs));
+        if (requestedReplayOffset >= 0L) return;
+        requestedReplayOffset = base;
+        long safeGapMs = Math.round(Math.max(0L, anchor - safeCommittedOffset)
+                * 1000.0 / (SAMPLE_RATE * 2.0));
+        diag("recognizer_replay_requested", "reason=" + reason
+                + ";activeGeneration=" + recognizerGeneration
+                + ";feedOffset=" + anchor
+                + ";safeOffset=" + safeCommittedOffset
+                + ";safeGapMs=" + safeGapMs
+                + ";rollbackOffset=" + requestedReplayOffset
+                + ";replayMs=" + boundedMs);
+    }
+
+'''
+        s = replaceRange020(s,
+                "    private void requestReplayFromSafe(String reason, long overlapMs) {",
+                "    private void appendBest(Bundle b, String source) {",
+                replayMethod,
+                "bounded replay method")
+
+        String replayOld = '''                        if (target < pos) {
+                            long old = pos;
+                            pos = target;
+                            feederReadOffset = pos;
+                            rewindBreakMarkersTo(pos);
+                            resetHighSpeedProcessorForReplay();
+                            diag("recognizer_replay", "from=" + old + ";to=" + pos'''
+        String replayNew = '''                        if (target < pos) {
+                            long old = pos;
+                            replayCatchupUntilOffset = Math.max(replayCatchupUntilOffset, old);
+                            pos = target;
+                            feederReadOffset = pos;
+                            rewindBreakMarkersTo(pos);
+                            resetHighSpeedProcessorForReplay();
+                            diag("recognizer_replay", "from=" + old + ";to=" + pos'''
+        if (!s.contains(replayOld)) throw new GradleException("v0.20 patch: replay block missing")
+        s = s.replace(replayOld, replayNew)
+
+        String writeMethod = '''    private boolean writeRecognizerBytesForGeneration(byte[] data, int generation,
+                                                        long rawStart, long rawEnd) {
+        if (data == null || data.length == 0) return true;
+        int offset = 0;
+        while (running && offset < data.length && !drainComplete) {
+            if (!recognizerReady || generation != recognizerGeneration) {
+                diag("feed_aborted", "feedGeneration=" + generation
+                        + ";activeGeneration=" + recognizerGeneration
+                        + ";rawStart=" + rawStart + ";rawEnd=" + rawEnd
+                        + ";encodedSent=" + offset + "/" + data.length);
+                return false;
+            }
+            OutputStream target;
+            synchronized (pipeLock) { target = pipeOut; }
+            if (target == null) {
+                sleepQuietly(20L);
+                continue;
+            }
+            int len = Math.min(4096, data.length - offset);
+            try {
+                target.write(data, offset, len);
+                offset += len;
+            } catch (IOException e) {
+                diag("feeder_pipe_retry", "feedGeneration=" + generation
+                        + ";activeGeneration=" + recognizerGeneration
+                        + ";rawStart=" + rawStart + ";rawEnd=" + rawEnd
+                        + ";encodedSent=" + offset
+                        + ";error=" + e.getClass().getSimpleName());
+                return false;
+            }
+        }
+        if (offset < data.length) return false;
+        paceRecognizerFeed(data.length, rawEnd);
+        recordFeedDiagnostic(generation, rawStart, rawEnd, data.length);
+        return true;
+    }
+
+    private void paceRecognizerFeed(int encodedBytes, long rawEnd) {
+        long backlogRaw = Math.max(0L, spoolBytesWritten - rawEnd);
+        boolean catchingUp = replayCatchupUntilOffset >= 0L && rawEnd < replayCatchupUntilOffset;
+        boolean buffered = backlogRaw >= rawBytesForMs(1100L);
+        if (catchingUp || buffered) {
+            double encodedMs = encodedBytes * 1000.0 / (SAMPLE_RATE * 2.0);
+            long wait = Math.round(encodedMs / REPLAY_CATCHUP_RATE);
+            if (wait > 0L) sleepQuietly(Math.min(900L, wait));
+        }
+        if (replayCatchupUntilOffset >= 0L && rawEnd >= replayCatchupUntilOffset) {
+            diag("recognizer_replay_caught_up", "atOffset=" + rawEnd
+                    + ";activeGeneration=" + recognizerGeneration);
+            replayCatchupUntilOffset = -1L;
+        }
+    }
+
+    private void recordFeedDiagnostic(int generation, long rawStart, long rawEnd, int encodedBytes) {
+        long now = System.currentTimeMillis();
+        if (feedDiagnosticStartOffset < 0L) feedDiagnosticStartOffset = rawStart;
+        feedDiagnosticEndOffset = rawEnd;
+        feedDiagnosticEncodedBytes += Math.max(0, encodedBytes);
+        if (lastFeedDiagnosticAt == 0L) lastFeedDiagnosticAt = now;
+        if (now - lastFeedDiagnosticAt < 2000L) return;
+        diag("recognizer_feed", "generation=" + generation
+                + ";startOffset=" + feedDiagnosticStartOffset
+                + ";endOffset=" + feedDiagnosticEndOffset
+                + ";encodedBytes=" + feedDiagnosticEncodedBytes
+                + ";safeOffset=" + safeCommittedOffset
+                + ";backlogMs=" + bufferedBacklogMs());
+        feedDiagnosticStartOffset = rawEnd;
+        feedDiagnosticEndOffset = rawEnd;
+        feedDiagnosticEncodedBytes = 0L;
+        lastFeedDiagnosticAt = now;
+    }
+
+'''
+        s = replaceRange020(s,
+                "    private boolean writeRecognizerBytesForGeneration(byte[] data, int generation,",
+                "    private void rewindBreakMarkersTo(long offset) {",
+                writeMethod,
+                "paced feeder writes")
+
+        s = s.replace(
+                "        if (spoolBytesConsumed >= spoolBytesWritten) {\n            finishHighSpeedProcessorToPipe();\n            markDrainComplete();\n        }",
+                "        if (feederReadOffset >= spoolBytesWritten) {\n            finishHighSpeedProcessorToPipe();\n            markDrainComplete();\n        }")
+        s = s.replace(
+                "        diag(\"buffer_drain_complete\", \"written=\" + spoolBytesWritten\n                + \";consumed=\" + spoolBytesConsumed);",
+                "        diag(\"buffer_drain_complete\", \"written=\" + spoolBytesWritten\n" +
+                "                + \";consumed=\" + spoolBytesConsumed\n" +
+                "                + \";feedOffset=\" + feederReadOffset\n" +
+                "                + \";safeOffset=\" + safeCommittedOffset);")
+
+        String topicMethod = '''    private boolean shouldTopicBreak(String text) {
+        String t = text == null ? "" : text.replaceAll("^[「『（(\\s]+", "");
+        String[] markers = {
+                "ラジオネーム", "続いて", "続きまして", "次のお便り", "続いてのお便り",
+                "それではこちらのコーナー", "こちらのコーナー", "ここからは", "ここで一曲",
+                "ここで1曲", "聞いていただいたのは", "お知らせ", "エンディングです",
+                "ということで最後まで", "以上 秋田のしおり", "以上秋田のしおり"
+        };
+        for (String m : markers) if (t.startsWith(m)) return true;
+        if (formatProfile != null && formatProfile.markers != null) {
+            for (String m : formatProfile.markers) {
+                if (!m.isEmpty() && t.startsWith(m)
+                        && !"ちなみに".equals(m) && !"ところで".equals(m)
+                        && !"はい".equals(m) && !"でも".equals(m)) return true;
+            }
+        }
+        return false;
+    }
+
+'''
+        s = replaceRange020(s,
+                "    private boolean shouldTopicBreak(String text) {",
+                "    private void appendRaw(String segment) {",
+                topicMethod,
+                "structural paragraph breaks")
+
+        serviceFile.write(s, "UTF-8")
+
+        File episodeFile = file("src/main/java/com/example/radikotranscriber/EpisodeStore.java")
+        String e = episodeFile.getText("UTF-8")
+        if (!e.contains("KerekereProgramStructure.biasTerms(program, title)")) {
+            e = e.replace(
+                    "        LinkedHashSet<String> set = new LinkedHashSet<>();\n        for (String term : KerekereContextProfile.biasTerms(program)) {",
+                    "        LinkedHashSet<String> set = new LinkedHashSet<>();\n" +
+                    "        for (String term : KerekereProgramStructure.biasTerms(program, title)) {\n" +
+                    "            if (set.size() >= 50) break;\n" +
+                    "            set.add(term);\n" +
+                    "        }\n" +
+                    "        for (String term : KerekereContextProfile.biasTerms(program)) {")
+        }
+        episodeFile.write(e, "UTF-8")
+
+        File mainFile = file("src/main/java/com/example/radikotranscriber/MainActivity.java")
+        String m = mainFile.getText("UTF-8")
+        if (!m.contains("lastAutoDescription")) {
+            m = m.replace(
+                    "    private String lastAutoEpisodeText = \"\";\n",
+                    "    private String lastAutoEpisodeText = \"\";\n    private String lastAutoDescription = \"\";\n")
+        }
+        m = m.replace(
+                "                final String u = editable == null ? \"\" : editable.toString().trim();\n                final int serial = ++metadataRequestSerial;",
+                "                final String u = editable == null ? \"\" : editable.toString().trim();\n" +
+                "                lastAutoDescription = \"\";\n" +
+                "                final int serial = ++metadataRequestSerial;")
+        if (!m.contains("lastAutoDescription = result.description")) {
+            m = m.replace(
+                    "            if (result.hasEpisodeIdentity()) {",
+                    "            lastAutoDescription = result.description == null ? \"\" : result.description.trim();\n" +
+                    "            if (lastAutoDescription.length() > 1200)\n" +
+                    "                lastAutoDescription = lastAutoDescription.substring(0, 1200);\n\n" +
+                    "            if (result.hasEpisodeIdentity()) {")
+        }
+        m = m.replace(
+                "                service.putExtra(\"autoStop\", autoStopCheck.isChecked());",
+                "                service.putExtra(\"autoStop\", autoStopCheck.isChecked());\n" +
+                "                service.putExtra(\"episodeContext\", lastAutoDescription);")
+        m = m.replace(
+                "            s.putExtra(\"autoStop\", autoStopCheck.isChecked());",
+                "            s.putExtra(\"autoStop\", autoStopCheck.isChecked());\n" +
+                "            s.putExtra(\"episodeContext\", lastAutoDescription);")
+        m = m.replace(
+                "        urlInput.setText(\"\");\n        applyingServiceText = true;",
+                "        urlInput.setText(\"\");\n        lastAutoDescription = \"\";\n        applyingServiceText = true;")
+        mainFile.write(m, "UTF-8")
+
+        File diagnosticFile = file("src/main/java/com/example/radikotranscriber/DiagnosticStore.java")
+        String d = diagnosticFile.getText("UTF-8")
+        d = d.replace("radiko-transcriber-diagnostics-v4", "radiko-transcriber-diagnostics-v5")
+        d = d.replace("null, null, \"at_ms ASC\", \"9000\")", "null, null, \"at_ms ASC\", \"12000\")")
+        if (!d.contains("programStructure")) {
+            d = d.replace(
+                    "                o.put(\"contextBoost\", KerekereContextBoost.VERSION);",
+                    "                o.put(\"contextBoost\", KerekereContextBoost.VERSION);\n" +
+                    "                o.put(\"programStructure\", KerekereProgramStructure.VERSION);")
+        }
+        diagnosticFile.write(d, "UTF-8")
+
+        File layout = file("src/main/res/layout/activity_main.xml")
+        String x = layout.getText("UTF-8")
+        x = x.replace("v0.19", "v0.20")
+        x = x.replace("欠落防止 / 重複抑制 / 一文一行 / けれけれ専用文脈",
+                "再送安定化 / 番組構造認識 / 一文一行 / 回ごと文脈")
+        layout.write(x, "UTF-8")
+    }
+}
