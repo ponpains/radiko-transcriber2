@@ -26,6 +26,7 @@ import java.util.Locale;
 public class EpisodeStore extends SQLiteOpenHelper {
     private static final String DB_NAME = "radiko_transcripts.db";
     private static final int DB_VERSION = 3;
+    private final Context appContext;
 
     public static class Episode {
         public long id;
@@ -72,7 +73,10 @@ public class EpisodeStore extends SQLiteOpenHelper {
         public long lastUpdatedAt;
     }
 
-    public EpisodeStore(Context context) { super(context, DB_NAME, null, DB_VERSION); }
+    public EpisodeStore(Context context) {
+        super(context.getApplicationContext(), DB_NAME, null, DB_VERSION);
+        appContext = context.getApplicationContext();
+    }
 
     @Override public void onConfigure(SQLiteDatabase db) {
         super.onConfigure(db);
@@ -195,10 +199,13 @@ public class EpisodeStore extends SQLiteOpenHelper {
     public void updateRecognition(long id, String rawTranscript, String autoTranscript,
                                   String status, float playbackSpeed, long durationMs) {
         if (id <= 0) return;
+        String auto = safe(autoTranscript);
+        String program = programForEpisode(id);
+        String formatted = FormatLearningStore.apply(appContext, program, auto);
         ContentValues v = new ContentValues();
         v.put("raw_transcript", safe(rawTranscript));
-        v.put("auto_transcript", safe(autoTranscript));
-        v.put("transcript", safe(autoTranscript));
+        v.put("auto_transcript", auto);
+        v.put("transcript", formatted);
         if (status != null) v.put("status", status);
         v.put("playback_speed", playbackSpeed);
         v.put("duration_ms", Math.max(0L, durationMs));
@@ -208,6 +215,10 @@ public class EpisodeStore extends SQLiteOpenHelper {
 
     public void updateEditedTranscript(long id, String transcript) {
         if (id <= 0) return;
+        Episode e = getEpisode(id);
+        if (e != null && !safe(transcript).equals(e.autoTranscript)) {
+            FormatLearningStore.learn(appContext, e.program, e.autoTranscript, transcript);
+        }
         ContentValues v = new ContentValues();
         v.put("transcript", safe(transcript));
         v.put("updated_at", System.currentTimeMillis());
@@ -222,6 +233,13 @@ public class EpisodeStore extends SQLiteOpenHelper {
         getWritableDatabase().update("episodes", v, "id=?", new String[]{String.valueOf(id)});
     }
 
+    private String programForEpisode(long id) {
+        Cursor c = getReadableDatabase().query("episodes", new String[]{"program"}, "id=?",
+                new String[]{String.valueOf(id)}, null, null, null);
+        try { return c.moveToFirst() ? safe(c.getString(0)) : ""; }
+        finally { c.close(); }
+    }
+
     public Episode getEpisode(long id) {
         Cursor c = getReadableDatabase().query("episodes", null, "id=?", new String[]{String.valueOf(id)}, null, null, null);
         try { return c.moveToFirst() ? fromCursor(c) : null; }
@@ -231,6 +249,14 @@ public class EpisodeStore extends SQLiteOpenHelper {
     public ArrayList<Episode> listEpisodes(String query) { return listEpisodes(query, ""); }
 
     public ArrayList<Episode> listEpisodes(String query, String programFilter) {
+        return listEpisodesInternal(query, programFilter, "1000");
+    }
+
+    public ArrayList<Episode> listAllEpisodes() {
+        return listEpisodesInternal("", "", null);
+    }
+
+    private ArrayList<Episode> listEpisodesInternal(String query, String programFilter, String limit) {
         ArrayList<Episode> out = new ArrayList<>();
         String q = safe(query).trim();
         String pf = safe(programFilter).trim();
@@ -244,7 +270,8 @@ public class EpisodeStore extends SQLiteOpenHelper {
         if (!pf.isEmpty()) { where.add("program=?"); args.add(pf); }
         String selection = where.isEmpty() ? null : join(where, " AND ");
         String[] selectionArgs = args.isEmpty() ? null : args.toArray(new String[0]);
-        Cursor c = getReadableDatabase().query("episodes", null, selection, selectionArgs, null, null, "updated_at DESC", "1000");
+        Cursor c = getReadableDatabase().query("episodes", null, selection, selectionArgs, null, null,
+                "updated_at DESC", limit);
         try { while (c.moveToNext()) out.add(fromCursor(c)); }
         finally { c.close(); }
         return out;
@@ -252,7 +279,8 @@ public class EpisodeStore extends SQLiteOpenHelper {
 
     public ArrayList<String> listPrograms() {
         ArrayList<String> out = new ArrayList<>();
-        Cursor c = getReadableDatabase().rawQuery("SELECT DISTINCT program FROM episodes WHERE TRIM(program)<>'' ORDER BY program COLLATE NOCASE", null);
+        Cursor c = getReadableDatabase().rawQuery(
+                "SELECT DISTINCT program FROM episodes WHERE TRIM(program)<>'' ORDER BY program COLLATE NOCASE", null);
         try { while (c.moveToNext()) out.add(c.getString(0)); }
         finally { c.close(); }
         return out;
@@ -281,7 +309,9 @@ public class EpisodeStore extends SQLiteOpenHelper {
         finally { c.close(); }
     }
 
-    public void deleteEpisode(long id) { getWritableDatabase().delete("episodes", "id=?", new String[]{String.valueOf(id)}); }
+    public void deleteEpisode(long id) {
+        getWritableDatabase().delete("episodes", "id=?", new String[]{String.valueOf(id)});
+    }
 
     public long addSegment(long episodeId, long startMs, long endMs, String rawText, String text, boolean topicBreak) {
         if (episodeId <= 0) return -1L;
@@ -297,7 +327,8 @@ public class EpisodeStore extends SQLiteOpenHelper {
 
     public ArrayList<Segment> listSegments(long episodeId) {
         ArrayList<Segment> out = new ArrayList<>();
-        Cursor c = getReadableDatabase().query("segments", null, "episode_id=?", new String[]{String.valueOf(episodeId)}, null, null, "start_ms ASC, id ASC");
+        Cursor c = getReadableDatabase().query("segments", null, "episode_id=?",
+                new String[]{String.valueOf(episodeId)}, null, null, "start_ms ASC, id ASC");
         try {
             while (c.moveToNext()) {
                 Segment s = new Segment();
@@ -330,8 +361,12 @@ public class EpisodeStore extends SQLiteOpenHelper {
         return out.toString();
     }
 
-    public void addCorrection(String program, String wrong, String correct) { addCorrectionInternal(program, wrong, correct, true); }
-    private void ensureCorrection(String program, String wrong, String correct) { addCorrectionInternal(program, wrong, correct, false); }
+    public void addCorrection(String program, String wrong, String correct) {
+        addCorrectionInternal(program, wrong, correct, true);
+    }
+    private void ensureCorrection(String program, String wrong, String correct) {
+        addCorrectionInternal(program, wrong, correct, false);
+    }
 
     private void addCorrectionInternal(String program, String wrong, String correct, boolean incrementExisting) {
         program = safe(program).trim();
@@ -355,8 +390,12 @@ public class EpisodeStore extends SQLiteOpenHelper {
             }
         } finally { c.close(); }
         ContentValues v = new ContentValues();
-        v.put("program", program); v.put("wrong", wrong); v.put("correct", correct); v.put("uses", 1);
-        v.put("created_at", now); v.put("updated_at", now);
+        v.put("program", program);
+        v.put("wrong", wrong);
+        v.put("correct", correct);
+        v.put("uses", 1);
+        v.put("created_at", now);
+        v.put("updated_at", now);
         db.insert("corrections", null, v);
     }
 
@@ -365,9 +404,11 @@ public class EpisodeStore extends SQLiteOpenHelper {
         String p = safe(program).trim();
         Cursor c;
         if (p.isEmpty()) {
-            c = getReadableDatabase().query("corrections", null, "program=''", null, null, null, "uses DESC, LENGTH(wrong) DESC", "300");
+            c = getReadableDatabase().query("corrections", null, "program=''", null, null, null,
+                    "uses DESC, LENGTH(wrong) DESC", "300");
         } else {
-            c = getReadableDatabase().query("corrections", null, "program=? OR program=''", new String[]{p}, null, null,
+            c = getReadableDatabase().query("corrections", null, "program=? OR program=''",
+                    new String[]{p}, null, null,
                     "CASE WHEN program='" + sqlLiteral(p) + "' THEN 0 ELSE 1 END, uses DESC, LENGTH(wrong) DESC", "300");
         }
         try {
@@ -375,19 +416,24 @@ public class EpisodeStore extends SQLiteOpenHelper {
                 Correction r = new Correction();
                 r.id = c.getLong(c.getColumnIndexOrThrow("id"));
                 r.program = c.getString(c.getColumnIndexOrThrow("program"));
-                r.wrong = c.getString(c.getColumnIndexOrThrow("wrong"));
-                r.correct = c.getString(c.getColumnIndexOrThrow("correct"));
+                // Old versions sometimes mixed line breaks into learned word replacements.
+                // Normalize them at read time so they no longer control paragraph layout.
+                r.wrong = normalizeLexical(c.getString(c.getColumnIndexOrThrow("wrong")));
+                r.correct = normalizeLexical(c.getString(c.getColumnIndexOrThrow("correct")));
                 r.uses = c.getInt(c.getColumnIndexOrThrow("uses"));
-                out.add(r);
+                if (!r.wrong.isEmpty() && !r.correct.isEmpty()) out.add(r);
             }
         } finally { c.close(); }
         return out;
     }
 
-    public void deleteCorrection(long id) { getWritableDatabase().delete("corrections", "id=?", new String[]{String.valueOf(id)}); }
+    public void deleteCorrection(long id) {
+        getWritableDatabase().delete("corrections", "id=?", new String[]{String.valueOf(id)});
+    }
 
     public void adjustCorrectionPriority(long id, int delta) {
-        Cursor c = getReadableDatabase().query("corrections", new String[]{"uses"}, "id=?", new String[]{String.valueOf(id)}, null, null, null);
+        Cursor c = getReadableDatabase().query("corrections", new String[]{"uses"}, "id=?",
+                new String[]{String.valueOf(id)}, null, null, null);
         int uses = 1;
         try { if (c.moveToFirst()) uses = c.getInt(0); }
         finally { c.close(); }
@@ -399,7 +445,9 @@ public class EpisodeStore extends SQLiteOpenHelper {
 
     public String applyCorrections(String program, String text) {
         String out = safe(text);
-        for (Correction r : getCorrections(program)) if (!r.wrong.isEmpty() && out.contains(r.wrong)) out = out.replace(r.wrong, r.correct);
+        for (Correction r : getCorrections(program)) {
+            if (!r.wrong.isEmpty() && out.contains(r.wrong)) out = out.replace(r.wrong, r.correct);
+        }
         return out;
     }
 
@@ -408,7 +456,8 @@ public class EpisodeStore extends SQLiteOpenHelper {
         addUsefulBias(set, safe(program));
         addUsefulBias(set, safe(title));
         for (Correction r : getCorrections(program)) {
-            if (r.correct.length() >= 2) set.add(r.correct);
+            String corrected = normalizeLexical(r.correct);
+            if (corrected.length() >= 2) set.add(corrected);
             if (set.size() >= 50) break;
         }
         return new ArrayList<>(set);
@@ -431,7 +480,8 @@ public class EpisodeStore extends SQLiteOpenHelper {
         String bestText = candidates.get(0);
         for (int i = 0; i < candidates.size(); i++) {
             String candidate = candidates.get(i) == null ? "" : candidates.get(i);
-            double score = confidence != null && i < confidence.length && confidence[i] >= 0 ? confidence[i] * 3.0 : 0.0;
+            double score = confidence != null && i < confidence.length && confidence[i] >= 0
+                    ? confidence[i] * 3.0 : 0.0;
             for (Correction r : rules) {
                 if (candidate.contains(r.correct)) score += 5.0 + Math.min(r.uses, 8);
                 if (candidate.contains(r.wrong)) score -= 4.0 + Math.min(r.uses, 8);
@@ -446,12 +496,16 @@ public class EpisodeStore extends SQLiteOpenHelper {
         if (e == null) return 0;
         String before = safe(e.autoTranscript), after = safe(editedText);
         if (before.equals(after)) return 0;
+
+        boolean formattingLearned = FormatLearningStore.learn(appContext, e.program, before, after);
         ArrayList<String[]> pairs = new ArrayList<>();
         collectDiffs(before, after, pairs, 0);
         LinkedHashSet<String> seen = new LinkedHashSet<>();
         int learned = 0;
         for (String[] pair : pairs) {
-            String wrong = cleanupDiff(pair[0]), correct = cleanupDiff(pair[1]);
+            // Newlines/extra spaces are layout information, not lexical corrections.
+            String wrong = normalizeLexical(cleanupDiff(pair[0]));
+            String correct = normalizeLexical(cleanupDiff(pair[1]));
             if (wrong.length() < 2 || wrong.length() > 40 || correct.isEmpty() || correct.length() > 40) continue;
             if (semantic(wrong).equals(semantic(correct))) continue;
             String key = wrong + "\u0000" + correct;
@@ -460,19 +514,23 @@ public class EpisodeStore extends SQLiteOpenHelper {
             learned++;
         }
         updateLearningBaseline(episodeId, after);
-        return learned;
+        return learned + (formattingLearned ? 1 : 0);
     }
 
     private void collectDiffs(String a, String b, ArrayList<String[]> out, int depth) {
         if (depth > 20 || a.equals(b)) return;
         int prefix = commonPrefix(a, b);
-        a = a.substring(prefix); b = b.substring(prefix);
+        a = a.substring(prefix);
+        b = b.substring(prefix);
         int suffix = commonSuffix(a, b);
         String am = suffix == 0 ? a : a.substring(0, a.length() - suffix);
         String bm = suffix == 0 ? b : b.substring(0, b.length() - suffix);
         if (am.isEmpty() && bm.isEmpty()) return;
         if (semantic(am).equals(semantic(bm))) return;
-        if (am.length() <= 40 && bm.length() <= 40) { out.add(new String[]{am, bm}); return; }
+        if (am.length() <= 40 && bm.length() <= 40) {
+            out.add(new String[]{am, bm});
+            return;
+        }
         int[] anchor = findAnchor(am, bm);
         if (anchor == null) return;
         collectDiffs(am.substring(0, anchor[0]), bm.substring(0, anchor[1]), out, depth + 1);
@@ -487,7 +545,8 @@ public class EpisodeStore extends SQLiteOpenHelper {
             int j = b.indexOf(token);
             if (j < 0) continue;
             int len = 8;
-            while (i + len < a.length() && j + len < b.length() && a.charAt(i + len) == b.charAt(j + len)) len++;
+            while (i + len < a.length() && j + len < b.length()
+                    && a.charAt(i + len) == b.charAt(j + len)) len++;
             if (len > bestLen) { bestA = i; bestB = j; bestLen = len; }
         }
         return bestLen >= 8 ? new int[]{bestA, bestB, bestLen} : null;
@@ -505,16 +564,29 @@ public class EpisodeStore extends SQLiteOpenHelper {
         return i;
     }
 
-    private String cleanupDiff(String s) { return safe(s).replaceAll("^[\\s、。！？!?，,.・：；]+|[\\s、。！？!?，,.・：；]+$", "").trim(); }
-    private String semantic(String s) { return safe(s).replaceAll("[\\s、。！？!?，,.・：；\"'「」『』（）()]+", ""); }
+    private String cleanupDiff(String s) {
+        return safe(s).replaceAll("^[\\s、。！？!?，,.・：；]+|[\\s、。！？!?，,.・：；]+$", "").trim();
+    }
+
+    private static String normalizeLexical(String s) {
+        return safe(s).replace("\r\n", " ").replace('\r', ' ').replace('\n', ' ')
+                .replaceAll("[ \\t]+", " ").trim();
+    }
+
+    private String semantic(String s) {
+        return safe(s).replaceAll("[\\s、。！？!?，,.・：；\"'「」『』（）()]+", "");
+    }
 
     private void ensureStarterCorrections(String program) {
         String p = safe(program).trim();
         if (p.contains("けれけれ")) {
             ensureCorrection(p, "キレキレ", "けれけれ");
+            ensureCorrection(p, "キレレ", "けれけれ");
+            ensureCorrection(p, "テレテレ", "けれけれ");
             ensureCorrection(p, "中田詩織", "永田詩央里");
             ensureCorrection(p, "中田詩央里", "永田詩央里");
             ensureCorrection(p, "永田詩織", "永田詩央里");
+            ensureCorrection(p, "長田詩織", "永田詩央里");
         }
     }
 
@@ -523,26 +595,44 @@ public class EpisodeStore extends SQLiteOpenHelper {
     public String exportBackupJson() {
         try {
             JSONObject root = new JSONObject();
-            root.put("format", "radiko-transcriber-backup-v3");
+            root.put("format", "radiko-transcriber-backup-v4");
             root.put("exportedAt", iso(System.currentTimeMillis()));
             JSONArray eps = new JSONArray();
-            for (Episode e : listEpisodes("")) {
+            for (Episode e : listAllEpisodes()) {
                 JSONObject o = new JSONObject();
-                o.put("id", e.id); o.put("program", e.program); o.put("episode", e.title); o.put("url", e.url);
-                o.put("status", e.status); o.put("playbackSpeed", e.playbackSpeed); o.put("notes", e.notes);
-                o.put("tags", e.tags); o.put("keyPoints", e.keyPoints); o.put("mediaStartMs", e.mediaStartMs);
-                o.put("durationMs", e.durationMs); o.put("startedAtMs", e.startedAt); o.put("updatedAtMs", e.updatedAt);
-                o.put("startedAt", iso(e.startedAt)); o.put("updatedAt", iso(e.updatedAt));
-                o.put("rawTranscript", e.rawTranscript); o.put("autoTranscript", e.autoTranscript); o.put("transcript", e.transcript);
+                o.put("id", e.id);
+                o.put("program", e.program);
+                o.put("episode", e.title);
+                o.put("url", e.url);
+                o.put("status", e.status);
+                o.put("playbackSpeed", e.playbackSpeed);
+                o.put("notes", e.notes);
+                o.put("tags", e.tags);
+                o.put("keyPoints", e.keyPoints);
+                o.put("mediaStartMs", e.mediaStartMs);
+                o.put("durationMs", e.durationMs);
+                o.put("startedAtMs", e.startedAt);
+                o.put("updatedAtMs", e.updatedAt);
+                o.put("startedAt", iso(e.startedAt));
+                o.put("updatedAt", iso(e.updatedAt));
+                o.put("rawTranscript", e.rawTranscript);
+                o.put("autoTranscript", e.autoTranscript);
+                o.put("transcript", e.transcript);
                 JSONArray segs = new JSONArray();
                 for (Segment s : listSegments(e.id)) {
                     JSONObject so = new JSONObject();
-                    so.put("startMs", s.startMs); so.put("endMs", s.endMs); so.put("rawText", s.rawText);
-                    so.put("text", s.text); so.put("topicBreak", s.topicBreak); segs.put(so);
+                    so.put("startMs", s.startMs);
+                    so.put("endMs", s.endMs);
+                    so.put("rawText", s.rawText);
+                    so.put("text", s.text);
+                    so.put("topicBreak", s.topicBreak);
+                    segs.put(so);
                 }
-                o.put("segments", segs); eps.put(o);
+                o.put("segments", segs);
+                eps.put(o);
             }
             root.put("episodes", eps);
+
             JSONArray cs = new JSONArray();
             Cursor c = getReadableDatabase().query("corrections", null, null, null, null, null, "program, uses DESC");
             try {
@@ -551,20 +641,25 @@ public class EpisodeStore extends SQLiteOpenHelper {
                     o.put("program", c.getString(c.getColumnIndexOrThrow("program")));
                     o.put("wrong", c.getString(c.getColumnIndexOrThrow("wrong")));
                     o.put("correct", c.getString(c.getColumnIndexOrThrow("correct")));
-                    o.put("uses", c.getInt(c.getColumnIndexOrThrow("uses"))); cs.put(o);
+                    o.put("uses", c.getInt(c.getColumnIndexOrThrow("uses")));
+                    cs.put(o);
                 }
             } finally { c.close(); }
             root.put("corrections", cs);
+
+            JSONArray formats = new JSONArray();
+            for (String p : listPrograms()) formats.put(FormatLearningStore.toJson(appContext, p));
+            root.put("formatLearning", formats);
             return root.toString(2);
         } catch (Exception e) {
-            return "{\"format\":\"radiko-transcriber-backup-v3\",\"episodes\":[],\"corrections\":[]}";
+            return "{\"format\":\"radiko-transcriber-backup-v4\",\"episodes\":[],\"corrections\":[]}";
         }
     }
 
     public String exportCsv() {
         StringBuilder out = new StringBuilder();
         out.append("id,program,episode,started_at,updated_at,status,playback_speed,duration,media_start,url,tags,key_points,notes,transcript\r\n");
-        for (Episode e : listEpisodes("")) {
+        for (Episode e : listAllEpisodes()) {
             out.append(e.id).append(',').append(csv(e.program)).append(',').append(csv(e.title)).append(',')
                     .append(csv(iso(e.startedAt))).append(',').append(csv(iso(e.updatedAt))).append(',')
                     .append(csv(e.status)).append(',').append(e.playbackSpeed).append(',')
@@ -577,31 +672,51 @@ public class EpisodeStore extends SQLiteOpenHelper {
 
     public int importBackupJson(String json, boolean replace) throws Exception {
         JSONObject root = new JSONObject(json);
-        JSONArray eps = root.optJSONArray("episodes"), cs = root.optJSONArray("corrections");
+        JSONArray eps = root.optJSONArray("episodes");
+        JSONArray cs = root.optJSONArray("corrections");
+        JSONArray formats = root.optJSONArray("formatLearning");
         SQLiteDatabase db = getWritableDatabase();
         int imported = 0;
         db.beginTransaction();
         try {
-            if (replace) { db.delete("segments", null, null); db.delete("episodes", null, null); db.delete("corrections", null, null); }
+            if (replace) {
+                db.delete("segments", null, null);
+                db.delete("episodes", null, null);
+                db.delete("corrections", null, null);
+            }
             HashMap<Long, Long> idMap = new HashMap<>();
             if (eps != null) {
                 for (int i = 0; i < eps.length(); i++) {
                     JSONObject o = eps.getJSONObject(i);
                     ContentValues v = new ContentValues();
-                    v.put("program", o.optString("program", "")); v.put("title", o.optString("episode", o.optString("title", "")));
-                    v.put("url", o.optString("url", "")); v.put("raw_transcript", o.optString("rawTranscript", o.optString("transcript", "")));
-                    v.put("auto_transcript", o.optString("autoTranscript", o.optString("transcript", ""))); v.put("transcript", o.optString("transcript", ""));
-                    v.put("status", o.optString("status", "saved")); v.put("playback_speed", (float)o.optDouble("playbackSpeed", 1.0));
-                    v.put("notes", o.optString("notes", "")); v.put("tags", o.optString("tags", "")); v.put("key_points", o.optString("keyPoints", ""));
-                    v.put("media_start_ms", o.optLong("mediaStartMs", parseMediaStartMs(o.optString("url", "")))); v.put("duration_ms", o.optLong("durationMs", 0L));
-                    v.put("started_at", o.optLong("startedAtMs", System.currentTimeMillis())); v.put("updated_at", o.optLong("updatedAtMs", System.currentTimeMillis()));
-                    long newId = db.insertOrThrow("episodes", null, v); idMap.put(o.optLong("id", -1L), newId);
+                    v.put("program", o.optString("program", ""));
+                    v.put("title", o.optString("episode", o.optString("title", "")));
+                    v.put("url", o.optString("url", ""));
+                    v.put("raw_transcript", o.optString("rawTranscript", o.optString("transcript", "")));
+                    v.put("auto_transcript", o.optString("autoTranscript", o.optString("transcript", "")));
+                    v.put("transcript", o.optString("transcript", ""));
+                    v.put("status", o.optString("status", "saved"));
+                    v.put("playback_speed", (float)o.optDouble("playbackSpeed", 1.0));
+                    v.put("notes", o.optString("notes", ""));
+                    v.put("tags", o.optString("tags", ""));
+                    v.put("key_points", o.optString("keyPoints", ""));
+                    v.put("media_start_ms", o.optLong("mediaStartMs", parseMediaStartMs(o.optString("url", ""))));
+                    v.put("duration_ms", o.optLong("durationMs", 0L));
+                    v.put("started_at", o.optLong("startedAtMs", System.currentTimeMillis()));
+                    v.put("updated_at", o.optLong("updatedAtMs", System.currentTimeMillis()));
+                    long newId = db.insertOrThrow("episodes", null, v);
+                    idMap.put(o.optLong("id", -1L), newId);
                     JSONArray segs = o.optJSONArray("segments");
                     if (segs != null) {
                         for (int j = 0; j < segs.length(); j++) {
-                            JSONObject so = segs.getJSONObject(j); ContentValues sv = new ContentValues();
-                            sv.put("episode_id", newId); sv.put("start_ms", so.optLong("startMs", 0L)); sv.put("end_ms", so.optLong("endMs", 0L));
-                            sv.put("raw_text", so.optString("rawText", "")); sv.put("text", so.optString("text", "")); sv.put("topic_break", so.optBoolean("topicBreak", false) ? 1 : 0);
+                            JSONObject so = segs.getJSONObject(j);
+                            ContentValues sv = new ContentValues();
+                            sv.put("episode_id", newId);
+                            sv.put("start_ms", so.optLong("startMs", 0L));
+                            sv.put("end_ms", so.optLong("endMs", 0L));
+                            sv.put("raw_text", so.optString("rawText", ""));
+                            sv.put("text", so.optString("text", ""));
+                            sv.put("topic_break", so.optBoolean("topicBreak", false) ? 1 : 0);
                             db.insert("segments", null, sv);
                         }
                     }
@@ -610,23 +725,40 @@ public class EpisodeStore extends SQLiteOpenHelper {
             }
             if (cs != null) {
                 for (int i = 0; i < cs.length(); i++) {
-                    JSONObject o = cs.getJSONObject(i); ContentValues v = new ContentValues();
-                    v.put("program", o.optString("program", "")); v.put("wrong", o.optString("wrong", "")); v.put("correct", o.optString("correct", ""));
-                    v.put("uses", Math.max(1, o.optInt("uses", 1))); v.put("created_at", System.currentTimeMillis()); v.put("updated_at", System.currentTimeMillis());
+                    JSONObject o = cs.getJSONObject(i);
+                    ContentValues v = new ContentValues();
+                    v.put("program", o.optString("program", ""));
+                    v.put("wrong", o.optString("wrong", ""));
+                    v.put("correct", o.optString("correct", ""));
+                    v.put("uses", Math.max(1, o.optInt("uses", 1)));
+                    v.put("created_at", System.currentTimeMillis());
+                    v.put("updated_at", System.currentTimeMillis());
                     db.insertWithOnConflict("corrections", null, v, SQLiteDatabase.CONFLICT_REPLACE);
                 }
             }
             db.setTransactionSuccessful();
         } finally { db.endTransaction(); }
+
+        if (formats != null) {
+            for (int i = 0; i < formats.length(); i++) {
+                FormatLearningStore.fromJson(appContext, formats.optJSONObject(i));
+            }
+        }
         return imported;
     }
 
     public void autoBackup(Context context) {
         try {
             File dir = context.getFilesDir();
-            File b0 = new File(dir, "radio_backup_0.json"), b1 = new File(dir, "radio_backup_1.json"), b2 = new File(dir, "radio_backup_2.json");
-            if (b2.exists()) b2.delete(); if (b1.exists()) b1.renameTo(b2); if (b0.exists()) b0.renameTo(b1);
-            try (OutputStreamWriter w = new OutputStreamWriter(new FileOutputStream(b0), "UTF-8")) { w.write(exportBackupJson()); }
+            File b0 = new File(dir, "radio_backup_0.json");
+            File b1 = new File(dir, "radio_backup_1.json");
+            File b2 = new File(dir, "radio_backup_2.json");
+            if (b2.exists()) b2.delete();
+            if (b1.exists()) b1.renameTo(b2);
+            if (b0.exists()) b0.renameTo(b1);
+            try (OutputStreamWriter w = new OutputStreamWriter(new FileOutputStream(b0), "UTF-8")) {
+                w.write(exportBackupJson());
+            }
         } catch (Exception ignored) {}
     }
 
@@ -635,7 +767,8 @@ public class EpisodeStore extends SQLiteOpenHelper {
         if (!f.exists()) throw new Exception("自動バックアップがありません");
         StringBuilder s = new StringBuilder();
         try (BufferedReader r = new BufferedReader(new InputStreamReader(new FileInputStream(f), "UTF-8"))) {
-            String line; while ((line = r.readLine()) != null) s.append(line).append('\n');
+            String line;
+            while ((line = r.readLine()) != null) s.append(line).append('\n');
         }
         return importBackupJson(s.toString(), true);
     }
@@ -650,34 +783,55 @@ public class EpisodeStore extends SQLiteOpenHelper {
 
     private Episode fromCursor(Cursor c) {
         Episode e = new Episode();
-        e.id = c.getLong(c.getColumnIndexOrThrow("id")); e.program = stringCol(c, "program"); e.title = stringCol(c, "title"); e.url = stringCol(c, "url");
-        e.rawTranscript = stringCol(c, "raw_transcript"); e.autoTranscript = stringCol(c, "auto_transcript"); e.transcript = stringCol(c, "transcript");
-        e.status = stringCol(c, "status"); e.playbackSpeed = c.getFloat(c.getColumnIndexOrThrow("playback_speed"));
-        e.notes = stringCol(c, "notes"); e.tags = stringCol(c, "tags"); e.keyPoints = stringCol(c, "key_points");
-        e.mediaStartMs = c.getLong(c.getColumnIndexOrThrow("media_start_ms")); e.durationMs = c.getLong(c.getColumnIndexOrThrow("duration_ms"));
-        e.startedAt = c.getLong(c.getColumnIndexOrThrow("started_at")); e.updatedAt = c.getLong(c.getColumnIndexOrThrow("updated_at")); return e;
+        e.id = c.getLong(c.getColumnIndexOrThrow("id"));
+        e.program = stringCol(c, "program");
+        e.title = stringCol(c, "title");
+        e.url = stringCol(c, "url");
+        e.rawTranscript = stringCol(c, "raw_transcript");
+        e.autoTranscript = stringCol(c, "auto_transcript");
+        e.transcript = stringCol(c, "transcript");
+        e.status = stringCol(c, "status");
+        e.playbackSpeed = c.getFloat(c.getColumnIndexOrThrow("playback_speed"));
+        e.notes = stringCol(c, "notes");
+        e.tags = stringCol(c, "tags");
+        e.keyPoints = stringCol(c, "key_points");
+        e.mediaStartMs = c.getLong(c.getColumnIndexOrThrow("media_start_ms"));
+        e.durationMs = c.getLong(c.getColumnIndexOrThrow("duration_ms"));
+        e.startedAt = c.getLong(c.getColumnIndexOrThrow("started_at"));
+        e.updatedAt = c.getLong(c.getColumnIndexOrThrow("updated_at"));
+        return e;
     }
 
-    private String stringCol(Cursor c, String name) { int i = c.getColumnIndex(name); return i < 0 || c.isNull(i) ? "" : c.getString(i); }
+    private String stringCol(Cursor c, String name) {
+        int i = c.getColumnIndex(name);
+        return i < 0 || c.isNull(i) ? "" : c.getString(i);
+    }
 
     public static long parseMediaStartMs(String url) {
         try {
-            if (url == null) return 0L; int q = url.indexOf('?'); if (q < 0) return 0L;
+            if (url == null) return 0L;
+            int q = url.indexOf('?');
+            if (q < 0) return 0L;
             for (String pair : url.substring(q + 1).split("&")) {
                 String[] kv = pair.split("=", 2);
                 if (kv.length == 2 && ("t".equals(kv[0]) || "time".equals(kv[0]))) {
-                    return Math.max(0L, Math.round(Double.parseDouble(URLDecoder.decode(kv[1], "UTF-8")) * 1000.0));
+                    return Math.max(0L, Math.round(Double.parseDouble(
+                            URLDecoder.decode(kv[1], "UTF-8")) * 1000.0));
                 }
             }
         } catch (Exception ignored) {}
         return 0L;
     }
 
-    public static String displayDate(long time) { return time <= 0 ? "—" : new SimpleDateFormat("yyyy/MM/dd HH:mm", Locale.JAPAN).format(new Date(time)); }
+    public static String displayDate(long time) {
+        return time <= 0 ? "—" : new SimpleDateFormat("yyyy/MM/dd HH:mm", Locale.JAPAN).format(new Date(time));
+    }
 
     public static String formatDuration(long ms) {
-        if (ms <= 0) return "—"; long sec = ms / 1000L, h = sec / 3600L, m = (sec % 3600L) / 60L, s = sec % 60L;
-        return h > 0 ? String.format(Locale.JAPAN, "%d:%02d:%02d", h, m, s) : String.format(Locale.JAPAN, "%d:%02d", m, s);
+        if (ms <= 0) return "—";
+        long sec = ms / 1000L, h = sec / 3600L, m = (sec % 3600L) / 60L, s = sec % 60L;
+        return h > 0 ? String.format(Locale.JAPAN, "%d:%02d:%02d", h, m, s)
+                : String.format(Locale.JAPAN, "%d:%02d", m, s);
     }
 
     public static String timeLabel(long ms) {
@@ -685,9 +839,25 @@ public class EpisodeStore extends SQLiteOpenHelper {
         return String.format(Locale.JAPAN, "%02d:%02d:%02d", h, m, s);
     }
 
-    private static String iso(long time) { return new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ssXXX", Locale.JAPAN).format(new Date(time)); }
-    private static String csv(String s) { String x = safe(s).replace("\r\n", "\n").replace("\r", "\n"); return "\"" + x.replace("\"", "\"\"") + "\""; }
+    private static String iso(long time) {
+        return new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ssXXX", Locale.JAPAN).format(new Date(time));
+    }
+
+    private static String csv(String s) {
+        String x = safe(s).replace("\r\n", "\n").replace("\r", "\n");
+        return "\"" + x.replace("\"", "\"\"") + "\"";
+    }
+
     private static String safe(String s) { return s == null ? "" : s; }
-    private static String join(ArrayList<String> list, String sep) { StringBuilder b = new StringBuilder(); for (int i = 0; i < list.size(); i++) { if (i > 0) b.append(sep); b.append(list.get(i)); } return b.toString(); }
+
+    private static String join(ArrayList<String> list, String sep) {
+        StringBuilder b = new StringBuilder();
+        for (int i = 0; i < list.size(); i++) {
+            if (i > 0) b.append(sep);
+            b.append(list.get(i));
+        }
+        return b.toString();
+    }
+
     private static String sqlLiteral(String s) { return safe(s).replace("'", "''"); }
 }
