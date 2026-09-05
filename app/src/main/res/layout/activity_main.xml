@@ -23,7 +23,7 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="3dp"
-            android:text="v0.13  •  高速再生バッファ / 診断ログ / 再生位置 / アプリ内Web実験"
+            android:text="v0.14  •  改行学習 / 診断ログ / 再生位置 / アプリ内Web＋文字起こし"
             android:textColor="#6B7280"
             android:textSize="12sp"/>
 
@@ -98,7 +98,7 @@
                 android:id="@+id/inAppPlaybackCheck"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:text="実験：開始後は外部ブラウザではなくアプリ内Webで開く"
+                android:text="実験：開始後はアプリ内でradiko＋文字起こしを同時表示"
                 android:textSize="13sp"/>
 
             <Button
@@ -120,7 +120,7 @@
                 android:id="@+id/openInAppButton"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:text="実験：アプリ内Webだけ開く"/>
+                android:text="実験：radiko＋文字起こし画面を開く"/>
 
             <Button
                 android:id="@+id/micStartButton"
@@ -215,7 +215,7 @@
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="3dp"
-                android:text="文ごとに改行し、話題転換や長い無音では空行を入れます。左右カーソル移動も使えます。"
+                android:text="文ごとに改行し、話題転換や長い無音では空行を入れます。あなたが直した改行・段落の傾向も番組ごとに学習します。"
                 android:textColor="#6B7280"
                 android:textSize="12sp"/>
 
@@ -239,7 +239,7 @@
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="7dp"
-                android:text="停止後に固有名詞などを直すと、番組別辞書として学習できます。"
+                android:text="停止後に固有名詞や改行・段落を直すと、表記辞書と番組ごとの整形傾向として学習します。"
                 android:textColor="#0F766E"
                 android:textSize="12sp"/>
 
@@ -247,7 +247,7 @@
                 android:id="@+id/learnButton"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:text="この修正を学習"/>
+                android:text="この表記・改行を学習"/>
 
             <Button
                 android:id="@+id/detailButton"
