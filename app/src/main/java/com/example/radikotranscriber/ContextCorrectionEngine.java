@@ -5,13 +5,13 @@ import android.content.Context;
 import android.database.sqlite.SQLiteDatabase;
 
 import java.util.ArrayList;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 /**
- * Conservative local post-correction. This is intentionally NOT a generative model: it only
- * changes high-confidence program terms and a few context-gated homophones. Unknown words are
- * left untouched rather than guessed. Raw/auto transcripts remain available for audit.
+ * Conservative local post-correction.
+ *
+ * Order matters: when the episode is "けれけれ", the researched program profile gets first say,
+ * then only generic context-gated homophones are considered. This is not a generative model and
+ * never invents words that were absent from the recognition result.
  */
 public final class ContextCorrectionEngine {
     private ContextCorrectionEngine() {}
@@ -19,45 +19,24 @@ public final class ContextCorrectionEngine {
     public static String refine(String program, String previousText, String segment) {
         String s = safe(segment);
         if (s.isEmpty()) return s;
-        String p = safe(program);
 
-        if (p.contains("けれけれ")) {
-            // Canonical host/show terms that repeatedly appeared as stable ASR confusions.
-            s = s.replace("中田詩織", "永田詩央里")
-                    .replace("中田詩央里", "永田詩央里")
-                    .replace("永田詩織", "永田詩央里")
-                    .replace("長田詩織", "永田詩央里")
-                    .replace("長田しおり", "永田詩央里");
+        // Program-specific context has priority over generic Japanese rules.
+        s = KerekereContextProfile.refine(program, previousText, s);
 
-            if (showContext(s, previousText)) {
-                s = s.replace("キレキレ", "けれけれ")
-                        .replace("キレレ", "けれけれ")
-                        .replace("テレテレ", "けれけれ")
-                        .replace("キレキャラ", "けれけれ");
-            }
-
-            if (containsAny(s, "ノットイコール", "永田詩央里", "けれけれ", "アイドルグループ")) {
-                s = s.replace("乗ってくるみ", "ノットイコールミー")
-                        .replace("乗っていく俺に", "ノットイコールミー")
-                        .replace("持っていく俺に", "ノットイコールミー")
-                        .replace("ノットイコールミー", "ノットイコールミー");
-            }
-            if (s.contains("ハッシュタグ")) s = s.replace("長田ラジオ", "永田ラジオ");
-
-            // Context-gated homophones. These only fire when the surrounding subject makes the
-            // intended word very strong, avoiding global replacements such as 公園->公演.
-            if (containsAny(s, "ツアー", "ライブ", "ステージ", "チケット", "体育館")) {
-                s = s.replace("昼公園", "昼公演").replace("夜公園", "夜公演");
-                s = replaceBounded(s, "公園", "公演", new String[]{"ツアー","ライブ","チケット","ステージ","ファイナル"});
-            }
-            if (containsAny(s, "ピーマン", "野菜", "苗", "収穫")) {
-                s = s.replace("初就活", "初収穫").replace("初 就活", "初収穫");
-            }
-            if (s.contains("ペット")) s = s.replace("ペットを買ったことがない", "ペットを飼ったことがない");
+        // Generic context-gated homophones. These never globally rewrite an ordinary word.
+        if (containsAny(s, "ツアー", "ライブ", "ステージ", "チケット", "体育館", "アリーナ")) {
+            s = s.replace("昼公園", "昼公演").replace("夜公園", "夜公演");
+            s = replaceBounded(s, "公園", "公演",
+                    new String[]{"ツアー","ライブ","チケット","ステージ","ファイナル","アリーナ"});
+        }
+        if (containsAny(s, "ピーマン", "野菜", "苗", "収穫")) {
+            s = s.replace("初就活", "初収穫").replace("初 就活", "初収穫");
+        }
+        if (s.contains("ペット")) {
+            s = s.replace("ペットを買ったことがない", "ペットを飼ったことがない");
         }
 
-        s = cleanupSpacing(s);
-        return s;
+        return cleanupSpacing(s);
     }
 
     /** Applies the same conservative rules to a finished transcript and removes exact long repeats. */
@@ -133,13 +112,6 @@ public final class ContextCorrectionEngine {
         return x.length() <= 140 ? x : x.substring(0, 140) + "…";
     }
 
-    private static boolean showContext(String s, String previous) {
-        String c = safe(previous);
-        if (c.length() > 240) c = c.substring(c.length() - 240);
-        c += " " + s;
-        return containsAny(c, "番組", "ラジオ", "永田", "詩央里", "聞いて", "過去回", "第", "パーソナリティ");
-    }
-
     private static String replaceBounded(String s, String wrong, String correct, String[] hints) {
         int i = s.indexOf(wrong);
         while (i >= 0) {
@@ -177,9 +149,11 @@ public final class ContextCorrectionEngine {
     private static String compact(String s) {
         return safe(s).replaceAll("[\\s、。！？!?，,.・：；]+", "");
     }
+
     private static boolean containsAny(String s, String... terms) {
         for (String t : terms) if (s.contains(t)) return true;
         return false;
     }
+
     private static String safe(String s) { return s == null ? "" : s; }
 }
