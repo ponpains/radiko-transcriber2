@@ -23,7 +23,7 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="3dp"
-            android:text="v0.14  •  改行学習 / 診断ログ / 再生位置 / アプリ内Web＋文字起こし"
+            android:text="v0.15  •  新規回を自動分離 / 改行学習 / アプリ内Web＋文字起こし"
             android:textColor="#6B7280"
             android:textSize="12sp"/>
 
@@ -386,7 +386,7 @@
             android:layout_height="wrap_content"
             android:layout_marginTop="14dp"
             android:paddingBottom="18dp"
-            android:text="安定優先なら外部ブラウザ＋1.0x。アプリ内Webは独立した実験機能なので、合わなければOFFのままで問題ありません。"
+            android:text="起動時は前回の本文ではなく、新しい回の入力状態から始まります。安定優先なら外部ブラウザ＋1.0xです。"
             android:textColor="#92400E"
             android:textSize="12sp"/>
     </LinearLayout>
