@@ -26,7 +26,6 @@ public class TranscribeService extends Service {
     private static final long WATCHDOG_INTERVAL_MS = 2000L;
     private static final long AUTO_STOP_SILENCE_MS = 25000L;
     private static final long AUTO_STOP_MIN_CAPTURE_MS = 60000L;
-    private static final long AUTO_STOP_NO_TEXT_MS = 15000L;
 
     private final Object pipeLock = new Object();
     private final Object spoolLock = new Object();
@@ -88,6 +87,7 @@ public class TranscribeService extends Service {
     private long mediaStartMs = 0L;
     private long lastSegmentEndMs = 0L;
     private long lastCommitWallAt = 0L;
+    private FormatLearningStore.Profile formatProfile = new FormatLearningStore.Profile();
 
     private float playbackSpeed = 1.0f;
     private boolean autoStopEnabled = true;
@@ -96,8 +96,18 @@ public class TranscribeService extends Service {
     private int permissionErrorRetries = 0;
     private boolean restartScheduled = false;
     private boolean finishScheduled = false;
-    private long recognizerSessionStartedAt = 0;
-    private long lastRecognizerCallbackAt = 0;
+    private long recognizerSessionStartedAt = 0L;
+    private long lastRecognizerCallbackAt = 0L;
+
+    private final Runnable finishAfterDrain = new Runnable() {
+        @Override public void run() {
+            finishScheduled = false;
+            if (!running || !drainComplete) return;
+            flushPartialForRecovery();
+            stopEverything("残りの音声まで文字起こしし、保存しました。",
+                    "complete", "buffer_drain_complete");
+        }
+    };
 
     private final Runnable watchdog = new Runnable() {
         @Override public void run() {
@@ -107,27 +117,22 @@ public class TranscribeService extends Service {
             if (captureActive && autoStopEnabled && firstAudibleAt > 0) {
                 long captureElapsed = now - firstAudibleAt;
                 long silence = now - lastAudibleAt;
-                long noText = lastCommitWallAt > 0 ? now - lastCommitWallAt : captureElapsed;
-                if (captureElapsed >= AUTO_STOP_MIN_CAPTURE_MS && silence >= AUTO_STOP_SILENCE_MS
-                        && noText >= AUTO_STOP_NO_TEXT_MS && peak < 24) {
-                    if (isHighSpeed()) {
-                        finishCaptureAndDrain("再生終了を検知しました。残りの音声を文字起こししています…", "auto_end");
-                    } else {
-                        flushPartialForRecovery();
-                        stopEverything("再生終了を検知し、自動停止・保存しました。", "complete", "auto_end");
-                    }
+                // Capture ending is intentionally independent from recognizer progress. At 1.5/2x
+                // recognition can be far behind while the actual playback has already ended.
+                if (captureElapsed >= AUTO_STOP_MIN_CAPTURE_MS
+                        && silence >= AUTO_STOP_SILENCE_MS && peak < 24) {
+                    finishCaptureAndDrain("再生終了を検知しました。残りの音声を文字起こししています…", "auto_end");
                     return;
-                } else if (captureElapsed >= AUTO_STOP_MIN_CAPTURE_MS && silence >= 15000L && peak < 24) {
+                } else if (captureElapsed >= AUTO_STOP_MIN_CAPTURE_MS
+                        && silence >= 15000L && peak < 24) {
                     long remain = Math.max(0L, (AUTO_STOP_SILENCE_MS - silence + 999L) / 1000L);
-                    broadcast("無音が続いています。再生が戻らなければ約" + remain + "秒で自動保存します。", true);
+                    broadcast("無音が続いています。再生が戻らなければ約" + remain + "秒で取り込みを終了します。", true);
                 }
             }
 
-            long stallTimeout = isHighSpeed() ? 22000L : 20000L;
-            long rollover = isHighSpeed() ? 60000L : 65000L;
-            boolean heardAudioRecently = isHighSpeed()
-                    ? spoolBytesConsumed < spoolBytesWritten
-                    : lastAudibleAt > 0 && now - lastAudibleAt < 7000L;
+            long stallTimeout = 24000L;
+            long rollover = 65000L;
+            boolean audioWaiting = spoolBytesConsumed < spoolBytesWritten;
             boolean recognizerStalled = lastRecognizerCallbackAt > 0
                     && now - lastRecognizerCallbackAt > stallTimeout;
             boolean sessionTooLong = recognizerSessionStartedAt > 0
@@ -135,12 +140,14 @@ public class TranscribeService extends Service {
 
             if (drainComplete) {
                 scheduleFinishAfterDrain(1800L);
-            } else if (!restartScheduled && (sessionTooLong || (heardAudioRecently && recognizerStalled))) {
+            } else if (!restartScheduled && (sessionTooLong || (audioWaiting && recognizerStalled))) {
                 diag("recognizer_watchdog", "stalled=" + recognizerStalled
                         + ";sessionTooLong=" + sessionTooLong
-                        + ";backlogMs=" + highSpeedBacklogMs());
+                        + ";backlogMs=" + bufferedBacklogMs());
                 flushPartialForRecovery();
-                requestRecognizerRestart("認識器を自動更新しています…", 180L);
+                // v0.13 diagnostics showed repeated server-disconnected errors when a new session
+                // was created only ~180ms after a planned rollover. The audio spool lets us wait.
+                requestRecognizerRestart("認識器を安全に更新しています…", 850L);
             }
 
             if (running) mainHandler.postDelayed(this, WATCHDOG_INTERVAL_MS);
@@ -178,10 +185,11 @@ public class TranscribeService extends Service {
             startForegroundForMode(true, "マイク文字起こしを準備中");
             beginMic();
         } else if (ACTION_STOP.equals(action)) {
-            if (running && isHighSpeed() && captureActive) {
+            if (running && captureActive) {
                 finishCaptureAndDrain("取り込みを停止しました。残りの音声を文字起こしして保存します…", "manual_stop");
-            } else {
-                stopEverything("文字起こしを停止しました。自動保存済みです。", "complete", "manual_stop");
+            } else if (running) {
+                stopEverything("文字起こしを停止しました。途中まで保存済みです。",
+                        "complete", "manual_stop_during_drain");
             }
         }
         return START_NOT_STICKY;
@@ -202,6 +210,7 @@ public class TranscribeService extends Service {
             rawText = finalText = program = episodeTitle = episodeHints = "";
             mediaStartMs = lastSegmentEndMs = 0L;
             episodeLabel = "文字起こし中";
+            formatProfile = FormatLearningStore.get(this, "");
             return;
         }
         rawText = e.rawTranscript == null ? "" : e.rawTranscript;
@@ -211,6 +220,7 @@ public class TranscribeService extends Service {
         episodeHints = (e.tags == null ? "" : e.tags) + " "
                 + (e.keyPoints == null ? "" : e.keyPoints);
         mediaStartMs = e.mediaStartMs;
+        formatProfile = FormatLearningStore.get(this, program);
         ArrayList<EpisodeStore.Segment> segments = store.listSegments(id);
         lastSegmentEndMs = segments.isEmpty()
                 ? mediaStartMs : segments.get(segments.size() - 1).endMs;
@@ -299,9 +309,9 @@ public class TranscribeService extends Service {
     }
 
     private String statusForRunning() {
-        if (playbackSpeed >= 1.9f) return "2倍速を取り込み中。音声認識は別バッファで追いかけています。";
-        if (playbackSpeed >= 1.4f) return "1.5倍速を取り込み中。音声認識は別バッファで追いかけています。";
-        return "バックグラウンドで文字起こし中（標準）。";
+        if (playbackSpeed >= 1.9f) return "2倍速を取り込み中。音声認識は一時バッファから追いかけています。";
+        if (playbackSpeed >= 1.4f) return "1.5倍速を取り込み中。音声認識は一時バッファから追いかけています。";
+        return "バックグラウンドで文字起こし中。音声は一時バッファで保護しています。";
     }
 
     private void beginRecorder(String message) throws Exception {
@@ -330,10 +340,11 @@ public class TranscribeService extends Service {
             nextBreakMarker = 0;
         }
 
-        if (isHighSpeed()) prepareSpool();
+        prepareSpool();
         acquireWakeLock();
         diag("session_start", "mode=" + mode + ";speed=" + playbackSpeed
-                + ";autoStop=" + autoStopEnabled + ";highSpeedBuffered=" + isHighSpeed());
+                + ";autoStop=" + autoStopEnabled + ";bufferedCapture=true"
+                + ";format=" + FormatLearningStore.describe(this, program));
         if (currentEpisodeId > 0) {
             store.updateRecognition(currentEpisodeId, rawText, finalText,
                     "recording", playbackSpeed, currentDurationMs());
@@ -341,7 +352,7 @@ public class TranscribeService extends Service {
         recorder.startRecording();
         startCaptureThread();
         startRecognizerSession(false);
-        if (isHighSpeed()) startHighSpeedFeeder();
+        startBufferedFeeder();
         mainHandler.removeCallbacks(watchdog);
         mainHandler.postDelayed(watchdog, WATCHDOG_INTERVAL_MS);
         broadcast(message, true);
@@ -349,14 +360,18 @@ public class TranscribeService extends Service {
     }
 
     private void prepareSpool() throws IOException {
-        File oldDir = getCacheDir();
-        File[] old = oldDir.listFiles((dir, name) -> name.startsWith("radiko_hs_") && name.endsWith(".pcm"));
+        File dir = getCacheDir();
+        File[] old = dir.listFiles((d, name) ->
+                (name.startsWith("radiko_buf_") || name.startsWith("radiko_hs_")) && name.endsWith(".pcm"));
         if (old != null) {
-            for (File f : old) if (System.currentTimeMillis() - f.lastModified() > 12L * 60L * 60L * 1000L) f.delete();
+            for (File f : old) {
+                if (System.currentTimeMillis() - f.lastModified() > 12L * 60L * 60L * 1000L) f.delete();
+            }
         }
-        spoolFile = new File(getCacheDir(), "radiko_hs_" + currentEpisodeId + "_" + System.currentTimeMillis() + ".pcm");
+        spoolFile = new File(getCacheDir(),
+                "radiko_buf_" + currentEpisodeId + "_" + System.currentTimeMillis() + ".pcm");
         spoolOut = new FileOutputStream(spoolFile, false);
-        diag("highspeed_spool", "created=" + spoolFile.getName());
+        diag("audio_spool", "created=" + spoolFile.getName());
     }
 
     private void startRecognizerSession(boolean recovery) {
@@ -395,9 +410,9 @@ public class TranscribeService extends Service {
                         touch();
                         diag("recognizer_error", "generation=" + generation + ";code=" + error
                                 + ";name=" + errorName(error) + ";sourceFinished=" + sourceFinished
-                                + ";drainComplete=" + drainComplete + ";backlogMs=" + highSpeedBacklogMs());
+                                + ";drainComplete=" + drainComplete + ";backlogMs=" + bufferedBacklogMs());
                         if (drainComplete) {
-                            scheduleFinishAfterDrain(700L);
+                            scheduleFinishAfterDrain(900L);
                             return;
                         }
                         if (error == SpeechRecognizer.ERROR_LANGUAGE_NOT_SUPPORTED
@@ -409,7 +424,7 @@ public class TranscribeService extends Service {
                             permissionErrorRetries++;
                             if (permissionErrorRetries <= 5) {
                                 flushPartialForRecovery();
-                                requestRecognizerRestart("権限状態を再確認して自動復旧しています…", 1200L);
+                                requestRecognizerRestart("権限状態を再確認して自動復旧しています…", 1400L);
                             } else {
                                 stopEverything("音声認識の権限を維持できませんでした。アプリを開いて再開してください。",
                                         "error", "recognizer_permission_error");
@@ -418,8 +433,14 @@ public class TranscribeService extends Service {
                         }
                         permissionErrorRetries = 0;
                         flushPartialForRecovery();
-                        requestRecognizerRestart("認識が途切れたため自動復旧しています…",
-                                error == SpeechRecognizer.ERROR_RECOGNIZER_BUSY ? 1100L : 400L);
+                        long delay;
+                        if (error == SpeechRecognizer.ERROR_RECOGNIZER_BUSY) delay = 1300L;
+                        else if (error == SpeechRecognizer.ERROR_SERVER_DISCONNECTED
+                                || error == SpeechRecognizer.ERROR_SERVER) delay = 1000L;
+                        else if (error == SpeechRecognizer.ERROR_NO_MATCH
+                                || error == SpeechRecognizer.ERROR_SPEECH_TIMEOUT) delay = 550L;
+                        else delay = 800L;
+                        requestRecognizerRestart("認識が途切れたため一時バッファから自動復旧しています…", delay);
                     }
 
                     @Override public void onResults(Bundle results) {
@@ -427,8 +448,8 @@ public class TranscribeService extends Service {
                         touch();
                         permissionErrorRetries = 0;
                         appendBest(results, "final");
-                        if (drainComplete) scheduleFinishAfterDrain(650L);
-                        else requestRecognizerRestart("次の認識区間へ接続中…", 220L);
+                        if (drainComplete) scheduleFinishAfterDrain(900L);
+                        else requestRecognizerRestart("次の認識区間へ接続中…", 600L);
                     }
 
                     @Override public void onPartialResults(Bundle partialResults) {
@@ -437,9 +458,7 @@ public class TranscribeService extends Service {
                         ArrayList<String> list = partialResults.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION);
                         if (list != null && !list.isEmpty()) {
                             partialText = chooseBestCandidateWithContext(list, null);
-                            broadcast(isHighSpeed()
-                                    ? highSpeedStatusText()
-                                    : "文字起こし中。バックグラウンドでも継続します。", true);
+                            broadcast(bufferedStatusText(), true);
                         }
                     }
 
@@ -455,8 +474,8 @@ public class TranscribeService extends Service {
                         if (!current()) return;
                         touch();
                         flushPartialForRecovery();
-                        if (drainComplete) scheduleFinishAfterDrain(650L);
-                        else requestRecognizerRestart("認識区間を更新しています…", 220L);
+                        if (drainComplete) scheduleFinishAfterDrain(900L);
+                        else requestRecognizerRestart("認識区間を更新しています…", 600L);
                     }
                     @Override public void onLanguageDetection(Bundle results) {}
                 });
@@ -481,14 +500,12 @@ public class TranscribeService extends Service {
                 recognizerSessionStartedAt = System.currentTimeMillis();
                 lastRecognizerCallbackAt = recognizerSessionStartedAt;
                 diag("recognizer_session_start", "generation=" + generation
-                        + ";recovery=" + recovery + ";backlogMs=" + highSpeedBacklogMs());
+                        + ";recovery=" + recovery + ";backlogMs=" + bufferedBacklogMs());
                 recognizer.startListening(ri);
-                if (recovery) broadcast(isHighSpeed()
-                        ? highSpeedStatusText()
-                        : "自動復旧しました。文字起こしを継続中です。", true);
+                if (recovery) broadcast(bufferedStatusText(), true);
             } catch (Exception e) {
                 diag("recognizer_session_exception", e.getClass().getSimpleName() + ":" + e.getMessage());
-                if (running && !drainComplete) requestRecognizerRestart("認識器を再接続しています…", 1400L);
+                if (running && !drainComplete) requestRecognizerRestart("認識器を再接続しています…", 1500L);
             }
         });
     }
@@ -546,18 +563,15 @@ public class TranscribeService extends Service {
             if (c.isEmpty()) continue;
             double score = confidence != null && i < confidence.length && confidence[i] >= 0
                     ? confidence[i] * 4.5 : 0.0;
-
             for (EpisodeStore.Correction r : corrections) {
                 if (!r.correct.isEmpty() && c.contains(r.correct)) score += 6.0 + Math.min(r.uses, 9);
                 if (!r.wrong.isEmpty() && c.contains(r.wrong)) score -= 5.0 + Math.min(r.uses, 9);
             }
-
             for (String hint : hints) {
                 String h = hint == null ? "" : hint.trim();
                 if (h.length() < 2 || h.length() > 30) continue;
                 if (c.contains(h)) score += Math.min(4.5, 0.9 + h.length() * 0.24);
             }
-
             score += Math.min(c.length(), 140) * 0.002;
             if (score > bestScore) {
                 bestScore = score;
@@ -610,7 +624,7 @@ public class TranscribeService extends Service {
         appendRaw(rawSegment);
         appendReadable(append, topicBreak, sentenceFromSilence);
 
-        long mediaEnd = currentRecognitionMediaPositionMs(now);
+        long mediaEnd = currentRecognitionMediaPositionMs();
         long estimated = Math.max(1200L, Math.min(12000L, append.length() * 150L));
         long segmentStart = lastSegmentEndMs > 0
                 ? lastSegmentEndMs : Math.max(mediaStartMs, mediaEnd - estimated);
@@ -632,20 +646,25 @@ public class TranscribeService extends Service {
             store.updateRecognition(currentEpisodeId, rawText, finalText,
                     "recording", playbackSpeed, currentDurationMs());
         }
-        broadcast(isHighSpeed() ? highSpeedStatusText()
-                : "文字起こし中。読みやすく整形しながら自動保存しています。", true);
+        broadcast(bufferedStatusText(), true);
     }
 
     private boolean shouldTopicBreak(String text) {
         String s = text.replaceAll("^[「『（(\\s]+", "");
         String[] markers = {
-                "さて", "続いて", "続きまして", "次に", "ここで", "ということで", "というわけで",
-                "では", "それでは", "話は変わ", "ところで", "改めて", "一方で", "ちなみに",
-                "ここから", "最後に", "それでは続いて", "まずは", "ここからは", "次のお便り",
-                "続いてのお便り", "ここで一曲", "それでは一曲"
+                "ラジオネーム", "さて", "続いて", "続きまして", "次に", "ここで",
+                "ということで", "というわけで", "では", "それでは", "話は変わ",
+                "ところで", "改めて", "一方で", "ちなみに", "ここから", "最後に",
+                "まずは", "ここからは", "次のお便り", "続いてのお便り",
+                "ここで一曲", "ここで1曲", "聞いていただいたのは", "お知らせ"
         };
         for (String m : markers) if (s.startsWith(m)) return true;
-        return currentParagraphLength() >= 180 || currentParagraphSentenceCount() >= 4;
+        if (formatProfile != null && formatProfile.markers != null) {
+            for (String m : formatProfile.markers) if (!m.isEmpty() && s.startsWith(m)) return true;
+        }
+        int charLimit = formatProfile == null ? 180 : formatProfile.paragraphChars;
+        int lineLimit = formatProfile == null ? 4 : formatProfile.linesPerParagraph;
+        return currentParagraphLength() >= charLimit || currentParagraphSentenceCount() >= lineLimit;
     }
 
     private void appendRaw(String segment) {
@@ -665,6 +684,8 @@ public class TranscribeService extends Service {
 
         String[] pieces = text.split("(?<=[。！？!?])");
         boolean firstPiece = true;
+        int charLimit = formatProfile == null ? 180 : formatProfile.paragraphChars;
+        int lineLimit = formatProfile == null ? 4 : formatProfile.linesPerParagraph;
         for (String piece : pieces) {
             piece = piece.trim();
             if (piece.isEmpty()) continue;
@@ -672,8 +693,8 @@ public class TranscribeService extends Service {
 
             boolean newParagraph = !finalText.isEmpty()
                     && ((firstPiece && topicBreak)
-                    || currentParagraphLength() >= 180
-                    || currentParagraphSentenceCount() >= 4);
+                    || currentParagraphLength() >= charLimit
+                    || currentParagraphSentenceCount() >= lineLimit);
 
             if (!finalText.isEmpty()) {
                 if (newParagraph) {
@@ -704,16 +725,18 @@ public class TranscribeService extends Service {
 
     private String insertStopsBeforeMarkers(String s) {
         String[] markers = {
-                "ということで", "というわけで", "ところで", "ちなみに", "続いて", "続きまして",
-                "それでは", "さて", "ここから", "ここからは", "最後に", "一方で", "まずは",
-                "次のお便り", "続いてのお便り"
+                "ということで", "というわけで", "ちなみに", "続いて", "続きまして",
+                "それでは", "さて", "ここから", "ここからは", "最後に", "一方で",
+                "まずは", "次のお便り", "続いてのお便り", "ラジオネーム",
+                "ここで1曲", "ここで一曲", "聞いていただいたのは", "お知らせ",
+                "ところで"
         };
         StringBuilder out = new StringBuilder();
         int sinceBoundary = 0;
         for (int i = 0; i < s.length();) {
             String found = null;
             for (String m : markers) {
-                if (s.startsWith(m, i)) {
+                if (s.startsWith(m, i) && safeMarkerBoundary(s, i)) {
                     found = m;
                     break;
                 }
@@ -735,6 +758,13 @@ public class TranscribeService extends Service {
             else sinceBoundary++;
         }
         return out.toString();
+    }
+
+    private boolean safeMarkerBoundary(String s, int index) {
+        if (index <= 0) return true;
+        char p = s.charAt(index - 1);
+        return Character.isWhitespace(p) || p == '。' || p == '！' || p == '？'
+                || p == '!' || p == '?' || p == '、' || p == '：' || p == ':';
     }
 
     private int currentParagraphLength() {
@@ -794,8 +824,7 @@ public class TranscribeService extends Service {
         return mediaStartMs + Math.max(0L, Math.round((now - firstAudibleAt) * playbackSpeed));
     }
 
-    private long currentRecognitionMediaPositionMs(long now) {
-        if (!isHighSpeed()) return currentMediaPositionMs(now);
+    private long currentRecognitionMediaPositionMs() {
         long rawAudioMs = Math.round(spoolBytesConsumed * 1000.0 / (SAMPLE_RATE * 2.0));
         return mediaStartMs + Math.max(0L, Math.round(rawAudioMs * playbackSpeed));
     }
@@ -806,8 +835,7 @@ public class TranscribeService extends Service {
         return Math.max(0L, Math.round((System.currentTimeMillis() - firstAudibleAt) * playbackSpeed));
     }
 
-    private long highSpeedBacklogMs() {
-        if (!isHighSpeed()) return 0L;
+    private long bufferedBacklogMs() {
         long remain = Math.max(0L, spoolBytesWritten - spoolBytesConsumed);
         double capturedMs = remain * 1000.0 / (SAMPLE_RATE * 2.0);
         return Math.max(0L, Math.round(capturedMs * playbackSpeed));
@@ -816,7 +844,7 @@ public class TranscribeService extends Service {
     private void startCaptureThread() {
         captureThread = new Thread(() -> {
             short[] buf = new short[4096];
-            long lastStatus = 0;
+            long lastStatus = 0L;
             while (running && captureActive) {
                 try {
                     int n = recorder.read(buf, 0, buf.length);
@@ -831,13 +859,8 @@ public class TranscribeService extends Service {
                     if (localPeak >= 35) {
                         if (silenceStartedAt > 0) {
                             long mediaGap = Math.round((now - silenceStartedAt) * playbackSpeed);
-                            if (isHighSpeed()) {
-                                if (mediaGap >= 550L) addBreakMarker(spoolBytesWritten, mediaGap >= 1400L);
-                            } else {
-                                if (mediaGap >= 1400L) pendingParagraphBreak = true;
-                                else if (mediaGap >= 550L) pendingSentenceBreak = true;
-                            }
-                            silenceStartedAt = 0;
+                            if (mediaGap >= 550L) addBreakMarker(spoolBytesWritten, mediaGap >= 1400L);
+                            silenceStartedAt = 0L;
                         }
                         if (firstAudibleAt == 0) firstAudibleAt = now;
                         lastAudibleAt = now;
@@ -845,17 +868,12 @@ public class TranscribeService extends Service {
                         silenceStartedAt = now;
                     }
 
-                    if (isHighSpeed()) {
-                        writeSpool(buf, n);
-                    } else {
-                        byte[] out = pcmBytes(buf, n);
-                        writePipe(out);
-                    }
+                    writeSpool(buf, n);
 
                     if (now - lastDiagnosticAudioAt >= 5000L) {
                         diag("audio_sample", "peak=" + peak + ";bytes=" + bytes
                                 + ";written=" + spoolBytesWritten + ";consumed=" + spoolBytesConsumed
-                                + ";backlogMs=" + highSpeedBacklogMs() + ";captureActive=" + captureActive);
+                                + ";backlogMs=" + bufferedBacklogMs() + ";captureActive=" + captureActive);
                         lastDiagnosticAudioAt = now;
                     }
 
@@ -863,10 +881,10 @@ public class TranscribeService extends Service {
                         String s;
                         if (bytes > SAMPLE_RATE * 2L * 6L && peak < 20) {
                             s = mode.equals("mic") ? "マイク入力がほぼ無音です。"
-                                    : "内部音声がほぼ無音です。ブラウザ再生を確認してください。";
+                                    : "内部音声がほぼ無音です。再生を確認してください。";
                         } else if (restartScheduled) {
-                            s = "音声は取得中です。認識器を自動復旧しています…";
-                        } else s = isHighSpeed() ? highSpeedStatusText() : statusForRunning();
+                            s = "音声取得は継続中です。認識器を安全に再接続しています…";
+                        } else s = bufferedStatusText();
                         broadcast(s, true);
                         updateNotification(s);
                         lastStatus = now;
@@ -920,16 +938,7 @@ public class TranscribeService extends Service {
         return out;
     }
 
-    private void writePipe(byte[] out) {
-        OutputStream target;
-        synchronized (pipeLock) { target = pipeOut; }
-        if (target != null) {
-            try { target.write(out); }
-            catch (IOException expectedDuringReconnect) { if (running) sleepQuietly(20L); }
-        } else sleepQuietly(20L);
-    }
-
-    private void startHighSpeedFeeder() {
+    private void startBufferedFeeder() {
         feederThread = new Thread(() -> {
             long pos = 0L;
             byte[] raw = new byte[16384];
@@ -963,23 +972,23 @@ public class TranscribeService extends Service {
                     for (int i = 0; i < samples.length; i++) {
                         samples[i] = (short)((raw[i * 2] & 0xff) | (raw[i * 2 + 1] << 8));
                     }
-                    byte[] stretched = encodeForRecognizer(samples, samples.length, playbackSpeed);
+                    byte[] encoded = encodeForRecognizer(samples, samples.length, playbackSpeed);
 
                     boolean sent = false;
                     while (running && !sent && !drainComplete) {
                         OutputStream target;
                         synchronized (pipeLock) { target = pipeOut; }
                         if (target == null) {
-                            sleepQuietly(30L);
+                            sleepQuietly(35L);
                             continue;
                         }
                         try {
-                            target.write(stretched);
+                            target.write(encoded);
                             sent = true;
                         } catch (IOException e) {
                             diag("feeder_pipe_retry", "generation=" + recognizerGeneration
                                     + ";pos=" + pos + ";error=" + e.getClass().getSimpleName());
-                            sleepQuietly(80L);
+                            sleepQuietly(100L);
                         }
                     }
                     if (!sent) continue;
@@ -990,30 +999,38 @@ public class TranscribeService extends Service {
 
                     long now = System.currentTimeMillis();
                     if (now - lastStatus > 1500L) {
-                        String s = highSpeedStatusText();
+                        String s = bufferedStatusText();
                         broadcast(s, true);
                         updateNotification(s);
                         lastStatus = now;
                     }
                 }
             } catch (Exception e) {
-                diag("highspeed_feeder_error", e.getClass().getSimpleName() + ":" + e.getMessage());
+                diag("buffered_feeder_error", e.getClass().getSimpleName() + ":" + e.getMessage());
                 if (running) mainHandler.post(() -> {
-                    if (sourceFinished) stopEverything("高速音声の処理中にエラーが起きました。途中まで保存しました。",
-                            "error", "highspeed_feeder_error");
+                    if (sourceFinished) stopEverything("音声の残り処理中にエラーが起きました。途中まで保存しました。",
+                            "error", "buffered_feeder_error");
                 });
             }
-        }, "HighSpeedSpoolFeeder");
+        }, "BufferedAudioFeeder");
         feederThread.start();
     }
 
-    private String highSpeedStatusText() {
-        long backlog = highSpeedBacklogMs();
+    private String bufferedStatusText() {
+        long backlog = bufferedBacklogMs();
         if (sourceFinished) {
-            return "再生取り込み完了。残り約" + formatShort(backlog) + "分を文字起こし処理中…";
+            return "再生取り込み完了。認識待ち約" + formatShort(backlog) + "を処理中…";
         }
-        return "高速再生を取り込み中。認識待ち約" + formatShort(backlog)
-                + "分（取り込み自体は継続しています）。";
+        if (isHighSpeed()) {
+            return (playbackSpeed >= 1.9f ? "2倍速" : "1.5倍速")
+                    + "を取り込み中。認識待ち約" + formatShort(backlog)
+                    + "（音声取得は継続しています）。";
+        }
+        if (backlog > 2500L) {
+            return "文字起こし中。認識待ち約" + formatShort(backlog)
+                    + "（音声は一時バッファに保存済み）。";
+        }
+        return "バックグラウンドで文字起こし中。音声は一時バッファで保護しています。";
     }
 
     private String formatShort(long ms) {
@@ -1047,7 +1064,7 @@ public class TranscribeService extends Service {
 
         if (spoolBytesConsumed >= spoolBytesWritten) markDrainComplete();
         else mainHandler.postDelayed(() -> {
-            if (running && sourceFinished) broadcast(highSpeedStatusText(), true);
+            if (running && sourceFinished) broadcast(bufferedStatusText(), true);
         }, 500L);
     }
 
@@ -1060,7 +1077,10 @@ public class TranscribeService extends Service {
         try (RandomAccessFile raf = new RandomAccessFile(spoolFile, "rw")) {
             raf.setLength(target);
             spoolBytesWritten = target;
-            diag("spool_trim", "silenceMs=" + silenceMs + ";newBytes=" + target);
+            frozenDurationMs = Math.max(0L,
+                    frozenDurationMs - Math.round(silenceMs * playbackSpeed));
+            diag("spool_trim", "silenceMs=" + silenceMs + ";newBytes=" + target
+                    + ";durationMs=" + frozenDurationMs);
         } catch (Exception e) {
             diag("spool_trim_error", e.getClass().getSimpleName());
         }
@@ -1069,30 +1089,23 @@ public class TranscribeService extends Service {
     private void markDrainComplete() {
         if (drainComplete) return;
         drainComplete = true;
-        diag("highspeed_drain_complete", "written=" + spoolBytesWritten
+        diag("buffer_drain_complete", "written=" + spoolBytesWritten
                 + ";consumed=" + spoolBytesConsumed);
         closePipeWriterOnly();
-        broadcast("高速音声の取り込みと送信が完了しました。最終認識を確定しています…", true);
+        broadcast("音声の送信が完了しました。最終認識を確定しています…", true);
         scheduleFinishAfterDrain(4500L);
     }
 
     private void scheduleFinishAfterDrain(long delayMs) {
-        if (!running || !drainComplete || finishScheduled) return;
+        if (!running || !drainComplete) return;
+        mainHandler.removeCallbacks(finishAfterDrain);
         finishScheduled = true;
-        mainHandler.postDelayed(() -> {
-            finishScheduled = false;
-            if (!running || !drainComplete) return;
-            flushPartialForRecovery();
-            stopEverything("高速音声の文字起こし処理が完了し、保存しました。",
-                    "complete", "highspeed_drain_complete");
-        }, delayMs);
+        mainHandler.postDelayed(finishAfterDrain, Math.max(500L, delayMs));
     }
 
     private byte[] encodeForRecognizer(short[] input, int n, float factor) {
         if (factor < 1.4f || n < 800) return pcmBytes(input, n);
 
-        // Larger overlap than the previous implementation. At 2x this still keeps 50% overlap,
-        // which is much less choppy than using a frame equal to the synthesis hop.
         int frame = 640;
         int analysisHop = 160;
         int synthHop = Math.max(analysisHop, Math.round(analysisHop * factor));
@@ -1174,6 +1187,7 @@ public class TranscribeService extends Service {
         restartScheduled = false;
         finishScheduled = false;
         mainHandler.removeCallbacks(watchdog);
+        mainHandler.removeCallbacks(finishAfterDrain);
         closePipe();
 
         try { if (recorder != null) recorder.stop(); } catch (Exception ignored) {}
@@ -1204,7 +1218,7 @@ public class TranscribeService extends Service {
         String text = displayText();
         long now = System.currentTimeMillis();
         long position = currentMediaPositionMs(now);
-        long backlog = highSpeedBacklogMs();
+        long backlog = bufferedBacklogMs();
         String phase = sourceFinished ? (drainComplete ? "finalizing" : "draining") : "capturing";
 
         getSharedPreferences("runtime_state", MODE_PRIVATE).edit()
@@ -1214,6 +1228,7 @@ public class TranscribeService extends Service {
                 .putString("status", status == null ? "" : status)
                 .putLong("mediaPositionMs", position)
                 .putLong("backlogMs", backlog)
+                .putFloat("playbackSpeed", playbackSpeed)
                 .putString("phase", phase)
                 .apply();
 
@@ -1250,6 +1265,7 @@ public class TranscribeService extends Service {
             case SpeechRecognizer.ERROR_NO_MATCH: return "NO_MATCH";
             case SpeechRecognizer.ERROR_RECOGNIZER_BUSY: return "RECOGNIZER_BUSY";
             case SpeechRecognizer.ERROR_SERVER: return "SERVER";
+            case SpeechRecognizer.ERROR_SERVER_DISCONNECTED: return "SERVER_DISCONNECTED";
             case SpeechRecognizer.ERROR_SPEECH_TIMEOUT: return "SPEECH_TIMEOUT";
             case SpeechRecognizer.ERROR_LANGUAGE_NOT_SUPPORTED: return "LANGUAGE_NOT_SUPPORTED";
             case SpeechRecognizer.ERROR_LANGUAGE_UNAVAILABLE: return "LANGUAGE_UNAVAILABLE";
@@ -1279,7 +1295,7 @@ public class TranscribeService extends Service {
                 .setContentText(text)
                 .setContentIntent(openPi)
                 .addAction(android.R.drawable.ic_media_pause,
-                        isHighSpeed() && captureActive ? "取り込み停止→残りを処理" : "停止して保存", stopPi)
+                        captureActive ? "取り込み停止→残りを処理" : "停止して保存", stopPi)
                 .setOngoing(true)
                 .setOnlyAlertOnce(true)
                 .build();
@@ -1291,6 +1307,7 @@ public class TranscribeService extends Service {
 
     @Override public void onDestroy() {
         mainHandler.removeCallbacks(watchdog);
+        mainHandler.removeCallbacks(finishAfterDrain);
         if (running) stopEverything("サービスを終了しました。途中まで保存済みです。",
                 "interrupted", "service_destroyed");
         releaseWakeLock();
