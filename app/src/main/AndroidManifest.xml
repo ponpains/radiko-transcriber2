@@ -13,6 +13,7 @@
     </queries>
 
     <application
+        android:name=".RadikoApplication"
         android:allowBackup="true"
         android:label="ラジオ文字起こし"
         android:theme="@style/Theme.RadikoTranscriber"
