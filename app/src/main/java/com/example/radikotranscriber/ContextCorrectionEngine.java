@@ -6,13 +6,7 @@ import android.database.sqlite.SQLiteDatabase;
 
 import java.util.ArrayList;
 
-/**
- * Conservative local post-correction.
- *
- * Order matters: when the episode is "けれけれ", the researched program profile gets first say,
- * then only generic context-gated corrections are considered. This is not a generative model and
- * never fills an unknown span merely because a sentence would sound plausible.
- */
+/** Conservative local post-correction. */
 public final class ContextCorrectionEngine {
     private ContextCorrectionEngine() {}
 
@@ -20,11 +14,11 @@ public final class ContextCorrectionEngine {
         String s = safe(segment);
         if (s.isEmpty()) return s;
 
-        // Program-specific context has priority over generic Japanese rules.
+        // Program-specific context always runs before generic Japanese homophones.
         s = KerekereContextProfile.refine(program, previousText, s);
-        String context = tail(previousText, 360) + " " + s;
+        s = KerekereContextBoost.refine(program, previousText, s);
+        String context = tail(previousText, 420) + " " + s;
 
-        // Generic context-gated homophones. These never globally rewrite an ordinary word.
         if (containsAny(context, "ツアー", "ライブ", "ステージ", "チケット", "体育館", "アリーナ")) {
             s = s.replace("昼公園", "昼公演").replace("夜公園", "夜公演");
             s = replaceBounded(s, "公園", "公演",
@@ -37,9 +31,6 @@ public final class ContextCorrectionEngine {
             s = s.replace("ペットを買ったことがない", "ペットを飼ったことがない");
         }
 
-        // Observed in the v0.16 diagnostic: "カーテンを開けて外のるを確認しました".
-        // With the surrounding 寝坊/朝/カーテン context, "明るさ" is high-confidence enough to
-        // recover; outside that context the odd phrase is left untouched.
         if (containsAny(context, "カーテン", "寝坊", "朝です", "起きたら")
                 && containsAny(s, "外のるを確認", "外の るを確認")) {
             s = s.replace("外のるを確認", "外の明るさを確認")
@@ -49,34 +40,41 @@ public final class ContextCorrectionEngine {
         return cleanupSpacing(s);
     }
 
-    /** Applies the same conservative rules to a finished transcript and removes exact long repeats. */
+    /**
+     * Applies context correction to a finished transcript and performs a second fuzzy cumulative
+     * duplicate pass. This is a safety net; the primary dedupe now happens before commit.
+     */
     public static String refineTranscript(String program, String text) {
         String src = safe(text).replace("\r\n", "\n").replace('\r','\n');
         String[] paragraphs = src.split("\\n\\n", -1);
         StringBuilder out = new StringBuilder(src.length());
-        String previous = "";
+        String recent = "";
         for (String paragraph : paragraphs) {
             StringBuilder pOut = new StringBuilder();
             for (String line : paragraph.split("\\n", -1)) {
-                String refined = refine(program, previous, line);
+                String refined = refine(program, recent, line);
                 if (refined.trim().isEmpty()) continue;
-                if (isDuplicateTail(previous, refined)) continue;
+
+                RecognitionTextMerger.MergeResult merge = RecognitionTextMerger.merge(recent, refined);
+                if (merge.duplicate) continue;
+                String append = merge.overlapCompactChars >= 20 ? merge.append : refined;
+                if (append.trim().isEmpty()) continue;
+
+                String formatted = TranscriptSentenceFormatter.formatBlock(append, true);
+                if (formatted.isEmpty()) continue;
                 if (pOut.length() > 0) pOut.append('\n');
-                pOut.append(refined);
-                previous = appendTail(previous, refined);
+                pOut.append(formatted);
+                recent = appendTail(recent, formatted);
             }
             if (pOut.length() > 0) {
                 if (out.length() > 0) out.append("\n\n");
                 out.append(pOut);
             }
         }
-        return out.toString().trim();
+        return out.toString().replaceAll("\\n{3,}", "\n\n").trim();
     }
 
-    /**
-     * Updates only the user-facing final transcript and segment text. raw_transcript and
-     * auto_transcript are deliberately untouched, so correction can always be audited/reverted.
-     */
+    /** Updates only the final transcript and corrected segment text; raw/auto remain auditable. */
     public static Result refineEpisode(Context context, EpisodeStore store, long episodeId) {
         Result result = new Result();
         EpisodeStore.Episode e = store.getEpisode(episodeId);
@@ -97,6 +95,7 @@ public final class ContextCorrectionEngine {
         String previous = "";
         for (EpisodeStore.Segment seg : segments) {
             String fixed = refine(e.program, previous, seg.text);
+            fixed = TranscriptSentenceFormatter.formatBlock(fixed, true);
             if (!fixed.equals(seg.text)) {
                 ContentValues sv = new ContentValues();
                 sv.put("text", fixed);
@@ -135,16 +134,9 @@ public final class ContextCorrectionEngine {
         return s;
     }
 
-    private static boolean isDuplicateTail(String previous, String line) {
-        String a = compact(previous), b = compact(line);
-        if (b.length() < 14 || a.length() < b.length()) return false;
-        int take = Math.min(b.length(), 120);
-        return a.endsWith(b.substring(0, take)) && (b.length() <= take || a.endsWith(b));
-    }
-
     private static String appendTail(String previous, String line) {
         String s = safe(previous) + "\n" + safe(line);
-        return s.length() > 500 ? s.substring(s.length() - 500) : s;
+        return s.length() > 1400 ? s.substring(s.length() - 1400) : s;
     }
 
     private static String tail(String text, int max) {
@@ -159,10 +151,6 @@ public final class ContextCorrectionEngine {
                 .replaceAll(" +([）)])", "$1")
                 .replaceAll("[ \\t]{2,}", " ")
                 .trim();
-    }
-
-    private static String compact(String s) {
-        return safe(s).replaceAll("[\\s、。！？!?，,.・：；]+", "");
     }
 
     private static boolean containsAny(String s, String... terms) {
