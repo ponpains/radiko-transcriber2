@@ -2,16 +2,15 @@ package com.example.radikotranscriber;
 
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
-import java.util.Locale;
 
 /**
  * Program-specific language profile for ABS radio "≠ME 永田詩央里のけれけれ".
  *
  * The vocabulary is intentionally separated from the user's learned replacement dictionary.
  * A program term can be highly likely without being a safe global replacement (for example
- * "キレキレ" can be a perfectly valid ordinary word).  This profile therefore contributes
- * recognition bias/candidate scoring and only performs corrections when the surrounding show
- * context makes the intended phrase strong.
+ * "キレキレ" can be a perfectly valid ordinary word). This profile therefore contributes
+ * recognition bias/candidate scoring and only performs corrections when surrounding show context
+ * makes the intended phrase strong.
  *
  * Seeded from official ≠ME information and public radiko episode descriptions through 2026-09-05.
  */
@@ -32,7 +31,7 @@ public final class KerekereContextProfile {
             "ふつおた", "おたがき"
     };
 
-    // Current members plus 菅波美玲, who appears in older episodes from the user's archive period.
+    // Current members plus 菅波美玲, useful for episodes from the user's older archive period.
     private static final String[] MEMBERS = {
             "尾木波菜", "落合希来里", "蟹沢萌子", "河口夏音", "川中子奈月心", "櫻井もも",
             "菅波美玲", "鈴木瞳美", "谷崎早耶", "冨田菜々風", "永田詩央里", "本田珠由記"
@@ -47,14 +46,14 @@ public final class KerekereContextProfile {
 
     private static final String[] KNOWN_BAD = {
             "中田詩織", "中田詩央里", "永田詩織", "長田詩織", "長田しおり",
-            "長田ラジオ", "けれねれ", "けれけ！", "ケレケレ", "キレレ", "テレテレ",
+            "長田ラジオ", "けれねれ", "けれけ！", "ケレケレ", "キレレ",
             "乗って行こうぜミー", "乗っていこうぜミー", "乗ってくるみ", "乗っていく俺に",
             "持っていく俺に"
     };
 
     private static final String[] BLOCKED_AUTOMATIC_SOURCES = {
             // These occurred in polluted learned dictionaries or are common enough that global
-            // replacement would be dangerous.  Show-specific variants are handled contextually.
+            // replacement would be dangerous. Show-specific variants are handled contextually.
             "キラキラ", "キレキレ", "キレレ", "テレテレ", "けれ", "くる", "きた", "きて",
             "言葉", "方が"
     };
@@ -84,8 +83,9 @@ public final class KerekereContextProfile {
     }
 
     /**
-     * Extra score for recognition candidates. Program vocabulary intentionally outweighs small
-     * confidence differences, while ordinary Japanese such as "キラキラ" receives no penalty.
+     * Extra score for recognition candidates. Program vocabulary outweighs small confidence
+     * differences only where it is safe. Ambiguous words such as "キラキラ", "キレキレ" and
+     * "テレテレ" are neither punished nor blindly rewritten.
      */
     public static double scoreCandidate(String program, String candidate, String previousText) {
         if (!applies(program)) return 0.0;
@@ -94,7 +94,18 @@ public final class KerekereContextProfile {
         String context = tail(previousText, 420) + " " + c;
         double score = 0.0;
 
-        for (String t : CORE) if (c.contains(t)) score += coreWeight(t);
+        boolean showContext = showTitleContext(context);
+        boolean corner = cornerContext(context);
+        boolean hashtag = hashtagContext(context);
+
+        for (String t : CORE) {
+            if (!c.contains(t)) continue;
+            if ("けれけれ".equals(t)) score += showContext ? 10.0 : 2.0;
+            else if ("聞いてけれ".equals(t) || "しおりん聞いてけれ".equals(t))
+                score += corner ? 10.0 : 2.0;
+            else if ("永田ラジオ".equals(t)) score += hashtag ? 10.0 : 3.0;
+            else score += coreWeight(t);
+        }
         for (String t : CORNERS) if (c.contains(t)) score += 7.0;
 
         boolean groupContext = containsAny(context, "≠ME", "ノットイコール", "ノイミー", "メンバー",
@@ -105,11 +116,9 @@ public final class KerekereContextProfile {
         if (akitaContext) for (String t : AKITA) if (c.contains(t)) score += 2.8;
 
         for (String bad : KNOWN_BAD) if (c.contains(bad)) score -= 8.0;
-        if (cornerContext(context) && containsAny(c, "聞いてくれ", "聞いてくけれ")) score -= 7.0;
-        if (hashtagContext(context) && c.contains("長田ラジオ")) score -= 10.0;
+        if (corner && containsAny(c, "聞いてくれ", "聞いてくけれ")) score -= 7.0;
+        if (hashtag && c.contains("長田ラジオ")) score -= 10.0;
 
-        // Deliberately DO NOT penalize "キラキラ". The v0.16 diagnostic proved it can be a real
-        // word in this show, and the old dictionary incorrectly changed it to "けれけれ".
         return Math.max(-24.0, Math.min(28.0, score));
     }
 
@@ -196,7 +205,6 @@ public final class KerekereContextProfile {
 
     private static double coreWeight(String term) {
         if ("永田詩央里".equals(term) || "ノットイコールミー".equals(term) || "≠ME".equals(term)) return 11.0;
-        if ("けれけれ".equals(term) || "しおりん聞いてけれ".equals(term) || "永田ラジオ".equals(term)) return 10.0;
         return 4.5;
     }
 
