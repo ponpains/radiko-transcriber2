@@ -1,15 +1,21 @@
 package com.example.radikotranscriber;
 
+import android.Manifest;
+import android.app.Activity;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.SharedPreferences;
+import android.content.pm.PackageManager;
 import android.graphics.Color;
 import android.graphics.Typeface;
+import android.media.projection.MediaProjectionManager;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.text.TextUtils;
 import android.view.Gravity;
 import android.view.MotionEvent;
@@ -25,21 +31,73 @@ import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
 
+import androidx.activity.result.ActivityResultLauncher;
+import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.appcompat.app.AppCompatActivity;
+import androidx.core.content.ContextCompat;
+
+import java.util.ArrayList;
 
 /**
- * Experimental and deliberately isolated from transcription/storage logic.
- * The WebView shares this screen with live status/transcript, but TranscribeService is independent.
+ * Experimental split-screen radiko view.
+ *
+ * v0.15 could open this Activity without starting TranscribeService, which looked like a capture
+ * failure even though the page itself played. v0.16 makes this screen self-sufficient: when no
+ * service is alive it requests the normal MediaProjection consent, creates a fresh episode if
+ * needed, starts the existing transcription service, and only then loads radiko.
  */
 public class InAppBrowserActivity extends AppCompatActivity {
     private WebView webView;
     private LinearLayout webHolder;
     private TextView statusView, positionView, transcriptView;
+    private Button retryButton;
     private String initialUrl = "";
     private boolean webExpanded = true;
+    private boolean webLoaded = false;
+    private boolean startingTranscription = false;
     private long episodeId = -1L;
     private EpisodeStore store;
     private DiagnosticStore diagnostics;
+    private MediaProjectionManager projectionManager;
+
+    private final ActivityResultLauncher<String> recordPermission = registerForActivityResult(
+            new ActivityResultContracts.RequestPermission(), granted -> {
+                if (granted) requestProjection();
+                else {
+                    startingTranscription = false;
+                    statusView.setText("マイク権限がないため文字起こしを開始できません。radikoの再生だけはできます。");
+                    retryButton.setVisibility(View.VISIBLE);
+                    loadWebOnce();
+                }
+            });
+
+    private final ActivityResultLauncher<Intent> projectionPermission = registerForActivityResult(
+            new ActivityResultContracts.StartActivityForResult(), result -> {
+                if (result.getResultCode() != Activity.RESULT_OK || result.getData() == null) {
+                    startingTranscription = false;
+                    statusView.setText("画面共有が許可されなかったため文字起こしは停止中です。再試行できます。");
+                    retryButton.setVisibility(View.VISIBLE);
+                    diagnostics.log(episodeId, "inapp_autostart_cancelled", "projection=false");
+                    loadWebOnce();
+                    return;
+                }
+                long id = ensureFreshEpisode();
+                Intent service = new Intent(this, TranscribeService.class);
+                service.setAction(TranscribeService.ACTION_START_INTERNAL);
+                service.putExtra("episodeId", id);
+                service.putExtra("resultCode", result.getResultCode());
+                service.putExtra("projectionData", result.getData());
+                // Direct opening has no speed selector. Home-started sessions keep their selected
+                // speed because this branch is skipped while that service is alive.
+                service.putExtra("playbackSpeed", 1.0f);
+                service.putExtra("autoStop", true);
+                ContextCompat.startForegroundService(this, service);
+                startingTranscription = false;
+                retryButton.setVisibility(View.GONE);
+                statusView.setText("文字起こしを開始しています。radikoで再生してください。");
+                diagnostics.log(id, "inapp_autostart_service", "speed=1.0;autoStop=true");
+                new Handler(Looper.getMainLooper()).postDelayed(this::loadWebOnce, 350L);
+            });
 
     private final BroadcastReceiver receiver = new BroadcastReceiver() {
         @Override public void onReceive(Context context, Intent intent) {
@@ -69,6 +127,7 @@ public class InAppBrowserActivity extends AppCompatActivity {
             if ("draining".equals(phase)) p += "   残り処理中";
             if (backlog > 1000L) p += "   認識待ち約" + EpisodeStore.formatDuration(backlog);
             positionView.setText(p);
+            retryButton.setVisibility(running ? View.GONE : View.VISIBLE);
 
             if (text != null && !text.contentEquals(transcriptView.getText())) {
                 boolean nearBottom = isNearBottom();
@@ -94,11 +153,20 @@ public class InAppBrowserActivity extends AppCompatActivity {
         }
         store = new EpisodeStore(this);
         diagnostics = new DiagnosticStore(this);
+        projectionManager = (MediaProjectionManager)getSystemService(MEDIA_PROJECTION_SERVICE);
         readRuntimeState();
         buildUi();
         registerUpdates();
-        webView.loadUrl(initialUrl);
         diagnostics.log(episodeId, "inapp_web_open", "split_screen=true;url=" + initialUrl);
+
+        if (serviceAlive()) {
+            loadWebOnce();
+            readRuntimeStateIntoViews();
+        } else {
+            // The in-app screen itself now means "play + transcribe", eliminating the old stopped
+            // dead-end. Consent is still the normal Android MediaProjection consent every session.
+            startTranscriptionIfNeeded();
+        }
     }
 
     private void buildUi() {
@@ -153,7 +221,7 @@ public class InAppBrowserActivity extends AppCompatActivity {
         info.setBackgroundColor(Color.WHITE);
 
         statusView = new TextView(this);
-        statusView.setText("文字起こし状態を取得中…");
+        statusView.setText("文字起こしを準備しています…");
         statusView.setTextSize(13);
         statusView.setTextColor(Color.rgb(31, 41, 55));
         info.addView(statusView);
@@ -164,6 +232,14 @@ public class InAppBrowserActivity extends AppCompatActivity {
         positionView.setTextColor(Color.rgb(6, 95, 70));
         positionView.setPadding(0, dp(4), 0, dp(4));
         info.addView(positionView);
+
+        retryButton = new Button(this);
+        retryButton.setText("文字起こしを開始・再試行");
+        retryButton.setTextSize(12);
+        retryButton.setOnClickListener(v -> startTranscriptionIfNeeded());
+        retryButton.setVisibility(View.GONE);
+        info.addView(retryButton, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(44)));
 
         LinearLayout actions = new LinearLayout(this);
         actions.setOrientation(LinearLayout.HORIZONTAL);
@@ -198,14 +274,14 @@ public class InAppBrowserActivity extends AppCompatActivity {
         transcriptView.setTextIsSelectable(true);
         transcriptView.setPadding(dp(12), dp(10), dp(12), dp(18));
         transcriptView.setLineSpacing(0, 1.12f);
-        transcriptView.setText("文字起こし開始後、ここに新しい結果が表示されます。");
+        transcriptView.setText("音声を再生すると、ここに新しい文字起こしが表示されます。");
         transcriptScroll.addView(transcriptView, new ViewGroup.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         root.addView(transcriptScroll, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
 
         TextView note = new TextView(this);
-        note.setText("radikoをたたんでもWebView自体は破棄しません。再生できない場合は「外部」を使えます。文字起こし本体とは独立しています。");
+        note.setText("この画面から直接開いた場合も文字起こし開始まで自動で進みます。入力値がずっと0なら「外部」で再生してください。Web再生部分は文字起こし本体から独立しています。");
         note.setTextSize(10);
         note.setTextColor(Color.DKGRAY);
         note.setPadding(dp(10), dp(5), dp(10), dp(8));
@@ -213,7 +289,69 @@ public class InAppBrowserActivity extends AppCompatActivity {
 
         setContentView(root);
         refreshFromDb();
-        readRuntimeStateIntoViews();
+    }
+
+    private void startTranscriptionIfNeeded() {
+        if (serviceAlive()) {
+            retryButton.setVisibility(View.GONE);
+            readRuntimeState();
+            readRuntimeStateIntoViews();
+            loadWebOnce();
+            return;
+        }
+        if (startingTranscription) return;
+        startingTranscription = true;
+        ensureFreshEpisode();
+        statusView.setText("文字起こしの許可を準備しています…");
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
+                != PackageManager.PERMISSION_GRANTED) {
+            recordPermission.launch(Manifest.permission.RECORD_AUDIO);
+        } else requestProjection();
+    }
+
+    private void requestProjection() {
+        if (projectionManager == null) {
+            startingTranscription = false;
+            statusView.setText("画面共有を開始できませんでした。");
+            retryButton.setVisibility(View.VISIBLE);
+            loadWebOnce();
+            return;
+        }
+        projectionPermission.launch(projectionManager.createScreenCaptureIntent());
+    }
+
+    private long ensureFreshEpisode() {
+        EpisodeStore.Episode current = episodeId > 0 ? store.getEpisode(episodeId) : null;
+        boolean reusable = current != null
+                && sameUrl(current.url, initialUrl)
+                && current.transcript.trim().isEmpty()
+                && current.rawTranscript.trim().isEmpty()
+                && "saved".equals(current.status);
+        if (reusable) return episodeId;
+
+        String program = "";
+        ArrayList<EpisodeStore.Episode> recent = store.listEpisodes("");
+        if (!recent.isEmpty()) program = recent.get(0).program;
+        episodeId = store.createEpisode(program, "名称未入力の回", initialUrl);
+        if (transcriptView != null) transcriptView.setText("");
+        diagnostics.log(episodeId, "inapp_new_episode_auto",
+                "previous=" + (current == null ? -1 : current.id));
+        return episodeId;
+    }
+
+    private boolean sameUrl(String a, String b) {
+        String x = a == null ? "" : a.trim();
+        String y = b == null ? "" : b.trim();
+        while (x.endsWith("/")) x = x.substring(0, x.length() - 1);
+        while (y.endsWith("/")) y = y.substring(0, y.length() - 1);
+        return x.equals(y);
+    }
+
+    private boolean serviceAlive() {
+        SharedPreferences p = getSharedPreferences("runtime_state", MODE_PRIVATE);
+        long heartbeat = p.getLong("heartbeatAt", 0L);
+        return p.getBoolean("running", false)
+                && System.currentTimeMillis() - heartbeat < 30000L;
     }
 
     private void setupWebView() {
@@ -244,6 +382,12 @@ public class InAppBrowserActivity extends AppCompatActivity {
             }
             return false;
         });
+    }
+
+    private void loadWebOnce() {
+        if (webLoaded || webView == null) return;
+        webLoaded = true;
+        webView.loadUrl(initialUrl);
     }
 
     private LinearLayout.LayoutParams webParams(boolean expanded) {
@@ -281,10 +425,9 @@ public class InAppBrowserActivity extends AppCompatActivity {
         boolean running = p.getBoolean("running", false)
                 && System.currentTimeMillis() - heartbeat < 30000L;
         if (!running) {
-            statusView.setText(episodeId > 0
-                    ? "文字起こしは停止中です。"
-                    : "「文字起こし開始」から開くと、ここに新しい文字起こしが表示されます。");
+            statusView.setText("文字起こしは停止中です。再試行できます。");
             positionView.setText("■ 停止   推定再生位置：—");
+            retryButton.setVisibility(View.VISIBLE);
             return;
         }
 
@@ -298,6 +441,7 @@ public class InAppBrowserActivity extends AppCompatActivity {
         if ("draining".equals(phase)) line += "   残り処理中";
         if (backlog > 1000L) line += "   認識待ち約" + EpisodeStore.formatDuration(backlog);
         positionView.setText(line);
+        retryButton.setVisibility(View.GONE);
     }
 
     private void refreshFromDb() {
@@ -331,8 +475,9 @@ public class InAppBrowserActivity extends AppCompatActivity {
 
     @Override protected void onResume() {
         super.onResume();
+        readRuntimeState();
         refreshFromDb();
-        if (statusView != null) readRuntimeStateIntoViews();
+        if (statusView != null && serviceAlive()) readRuntimeStateIntoViews();
     }
 
     @Override public void onBackPressed() {
@@ -352,6 +497,7 @@ public class InAppBrowserActivity extends AppCompatActivity {
             } catch (Exception ignored) {}
             webView = null;
         }
+        try { if (store != null) store.close(); } catch (Exception ignored) {}
         super.onDestroy();
     }
 
