@@ -9,7 +9,6 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
-import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 
@@ -18,13 +17,13 @@ import java.util.Set;
  *
  * Older builds learned arbitrary diff spans. That produced inverse pairs such as A->B and B->A,
  * very short common-word replacements, and several competing replacements for the same source.
- * Those rules then cascaded because replacements were applied sequentially. This class removes
- * ambiguous legacy rules, installs a DB guard for future inserts, and provides single-pass
- * replacement so replacement output is never fed into another rule in the same pass.
+ * Those rules then cascaded because replacements were applied sequentially.
+ *
+ * v0.17 makes an important distinction: show vocabulary belongs in KerekereContextProfile and is
+ * context-gated. Ambiguous ordinary Japanese (e.g. キラキラ / キレキレ / けれ / くる) must never
+ * become a global learned replacement merely because it was edited once.
  */
 public final class CorrectionSanitizer {
-    private static final String DB_PROGRAM = "program";
-
     private CorrectionSanitizer() {}
 
     private static class Row {
@@ -42,6 +41,7 @@ public final class CorrectionSanitizer {
         int removed = 0;
         try {
             db.execSQL("DROP TRIGGER IF EXISTS corrections_guard_v16");
+            db.execSQL("DROP TRIGGER IF EXISTS corrections_guard_v17");
             ArrayList<Row> rows = readRows(db);
             HashSet<Long> delete = new HashSet<>();
             HashMap<String, ArrayList<Row>> byWrong = new HashMap<>();
@@ -114,11 +114,12 @@ public final class CorrectionSanitizer {
         return removed;
     }
 
-    /** Strict gate used for automatic learning. Manual dictionary edits still go through DB guard. */
-    public static boolean isSafeLearnedPair(String wrong, String correct) {
+    /** Strict gate used for automatic learning. */
+    public static boolean isSafeLearnedPair(String program, String wrong, String correct) {
         String w = normalize(wrong);
         String c = normalize(correct);
         if (w.isEmpty() || c.isEmpty() || semantic(w).equals(semantic(c))) return false;
+        if (KerekereContextProfile.isUnsafeAutomaticPair(program, w, c)) return false;
         if (isProtected(w, c)) return true;
         int wl = semantic(w).length(), cl = semantic(c).length();
         if (wl < 4 || cl < 2 || wl > 28 || cl > 28) return false;
@@ -126,11 +127,17 @@ public final class CorrectionSanitizer {
         if (containsSentenceBoundary(w) || containsSentenceBoundary(c)) return false;
 
         // A one-off edit that rewrites most of a phrase is usually alignment noise, not a reusable
-        // spelling correction. Proper-name corrections remain well below this threshold.
+        // spelling correction. The tighter v0.17 threshold specifically rejects things such as
+        // キラキラ -> けれけれ while still allowing near-spelling proper-name fixes.
         String ws = semantic(w), cs = semantic(c);
         int max = Math.max(ws.length(), cs.length());
-        if (max >= 8 && levenshtein(ws, cs) > Math.ceil(max * 0.55)) return false;
+        if (max >= 4 && levenshtein(ws, cs) > Math.ceil(max * 0.50)) return false;
         return true;
+    }
+
+    /** Backward-compatible overload for non-program callers. */
+    public static boolean isSafeLearnedPair(String wrong, String correct) {
+        return isSafeLearnedPair("", wrong, correct);
     }
 
     /** Applies rules against the original input only. Output from one rule cannot trigger another. */
@@ -138,7 +145,6 @@ public final class CorrectionSanitizer {
         String src = text == null ? "" : text;
         if (src.isEmpty() || rules == null || rules.isEmpty()) return src;
 
-        // One source -> one answer. Prefer highest use count and then the longest target.
         LinkedHashMap<String, EpisodeStore.Correction> chosen = new LinkedHashMap<>();
         for (EpisodeStore.Correction r : rules) {
             if (r == null) continue;
@@ -192,12 +198,13 @@ public final class CorrectionSanitizer {
     private static boolean isUnsafeExisting(Row r) {
         String w = r.wrong, c = r.correct;
         if (w.isEmpty() || c.isEmpty() || semantic(w).equals(semantic(c))) return true;
+        if (KerekereContextProfile.isUnsafeAutomaticPair(r.program, w, c)) return true;
         int wl = semantic(w).length(), cl = semantic(c).length();
         if (wl < 4 || cl < 2 || wl > 32 || cl > 32) return true;
         if (r.uses <= 1 && (w.length() > 24 || c.length() > 24 || countWords(w) > 4 || countWords(c) > 4)) return true;
         if (r.uses <= 1 && (containsSentenceBoundary(w) || containsSentenceBoundary(c))) return true;
-        if (r.uses <= 1 && Math.max(wl, cl) >= 8
-                && levenshtein(semantic(w), semantic(c)) > Math.ceil(Math.max(wl, cl) * 0.62)) return true;
+        if (r.uses <= 1 && Math.max(wl, cl) >= 4
+                && levenshtein(semantic(w), semantic(c)) > Math.ceil(Math.max(wl, cl) * 0.50)) return true;
         return false;
     }
 
@@ -214,15 +221,16 @@ public final class CorrectionSanitizer {
         return false;
     }
 
+    /** Only genuinely unambiguous identity spellings are global protected replacements. */
     private static void ensureProtectedStarters(SQLiteDatabase db) {
         ArrayList<String> programs = new ArrayList<>();
         Cursor c = db.rawQuery("SELECT DISTINCT program FROM episodes WHERE program LIKE '%けれけれ%'", null);
         try { while (c.moveToNext()) programs.add(safe(c.getString(0))); } finally { c.close(); }
         long now = System.currentTimeMillis();
         String[][] rules = {
-                {"キレキレ","けれけれ"},{"キレレ","けれけれ"},{"テレテレ","けれけれ"},
                 {"中田詩織","永田詩央里"},{"中田詩央里","永田詩央里"},
-                {"永田詩織","永田詩央里"},{"長田詩織","永田詩央里"}
+                {"永田詩織","永田詩央里"},{"長田詩織","永田詩央里"},
+                {"長田しおり","永田詩央里"}
         };
         for (String p : programs) for (String[] r : rules) {
             ContentValues v = new ContentValues();
@@ -234,10 +242,13 @@ public final class CorrectionSanitizer {
 
     private static void installGuard(SQLiteDatabase db) {
         db.execSQL("DROP TRIGGER IF EXISTS corrections_guard_v16");
-        db.execSQL("CREATE TRIGGER corrections_guard_v16 BEFORE INSERT ON corrections WHEN " +
+        db.execSQL("DROP TRIGGER IF EXISTS corrections_guard_v17");
+        db.execSQL("CREATE TRIGGER corrections_guard_v17 BEFORE INSERT ON corrections WHEN " +
                 "TRIM(NEW.wrong)=TRIM(NEW.correct) OR " +
-                "(LENGTH(TRIM(NEW.wrong))<=3 AND NOT (NEW.correct='けれけれ' AND NEW.wrong IN ('キレキレ','キレレ','テレテレ'))) OR " +
+                "LENGTH(TRIM(NEW.wrong))<=3 OR " +
                 "LENGTH(TRIM(NEW.wrong))>28 OR LENGTH(TRIM(NEW.correct))>28 OR " +
+                "(NEW.program LIKE '%けれけれ%' AND TRIM(NEW.wrong) IN " +
+                "('キラキラ','キレキレ','キレレ','テレテレ','けれ','くる','きた','きて','言葉','方が')) OR " +
                 "EXISTS(SELECT 1 FROM corrections c WHERE c.program=NEW.program AND c.wrong=NEW.correct AND c.correct=NEW.wrong) OR " +
                 "EXISTS(SELECT 1 FROM corrections c WHERE c.program=NEW.program AND c.wrong=NEW.wrong AND c.correct<>NEW.correct) " +
                 "BEGIN SELECT RAISE(IGNORE); END");
@@ -245,10 +256,8 @@ public final class CorrectionSanitizer {
 
     private static boolean isProtected(String wrong, String correct) {
         String w = normalize(wrong), c = normalize(correct);
-        if ("けれけれ".equals(c) && ("キレキレ".equals(w) || "キレレ".equals(w) || "テレテレ".equals(w))) return true;
-        if ("永田詩央里".equals(c) && ("中田詩織".equals(w) || "中田詩央里".equals(w)
-                || "永田詩織".equals(w) || "長田詩織".equals(w))) return true;
-        return false;
+        return "永田詩央里".equals(c) && ("中田詩織".equals(w) || "中田詩央里".equals(w)
+                || "永田詩織".equals(w) || "長田詩織".equals(w) || "長田しおり".equals(w));
     }
 
     private static String key(String p, String w) { return safe(p) + "\u0001" + normalize(w); }
