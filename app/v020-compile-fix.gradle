@@ -1,0 +1,63 @@
+// Java 8-safe source cleanup after v0.20's build-time patch.
+def replaceRange020Fix = { String text, String startMarker, String endMarker, String replacement, String label ->
+    int a = text.indexOf(startMarker)
+    if (a < 0) throw new GradleException("v0.20 compile fix: start marker missing: " + label)
+    int b = text.indexOf(endMarker, a)
+    if (b < 0) throw new GradleException("v0.20 compile fix: end marker missing: " + label)
+    return text.substring(0, a) + replacement + text.substring(b)
+}
+
+tasks.named("preBuild").configure {
+    doLast {
+        File serviceFile = file("src/main/java/com/example/radikotranscriber/TranscribeService.java")
+        String s = serviceFile.getText("UTF-8")
+
+        String contextMethod = '''    private void appendEpisodePageContext(Intent intent) {
+        if (intent == null) return;
+        String page = intent.getStringExtra("episodeContext");
+        if (page == null) return;
+        page = page.replace((char)10, ' ').replace((char)13, ' ').replaceAll("[ \\t]{2,}", " ").trim();
+        if (page.length() > 1200) page = page.substring(0, 1200);
+        if (page.isEmpty()) return;
+        episodeHints = (episodeHints + " " + page).trim();
+        diag("episode_context_loaded", "chars=" + page.length()
+                + ";structure=" + KerekereProgramStructure.VERSION);
+    }
+
+'''
+        s = replaceRange020Fix(s,
+                "    private void appendEpisodePageContext(Intent intent) {",
+                "    private void startForegroundForMode(boolean micOnly, String text) {",
+                contextMethod,
+                "episode context")
+
+        String topicMethod = '''    private boolean shouldTopicBreak(String text) {
+        String t = text == null ? "" : text.trim();
+        while (!t.isEmpty() && "「『（(".indexOf(t.charAt(0)) >= 0) t = t.substring(1).trim();
+        String[] markers = {
+                "ラジオネーム", "続いて", "続きまして", "次のお便り", "続いてのお便り",
+                "それではこちらのコーナー", "こちらのコーナー", "ここからは", "ここで一曲",
+                "ここで1曲", "聞いていただいたのは", "お知らせ", "エンディングです",
+                "ということで最後まで", "以上 秋田のしおり", "以上秋田のしおり"
+        };
+        for (String m : markers) if (t.startsWith(m)) return true;
+        if (formatProfile != null && formatProfile.markers != null) {
+            for (String m : formatProfile.markers) {
+                if (!m.isEmpty() && t.startsWith(m)
+                        && !"ちなみに".equals(m) && !"ところで".equals(m)
+                        && !"はい".equals(m) && !"でも".equals(m)) return true;
+            }
+        }
+        return false;
+    }
+
+'''
+        s = replaceRange020Fix(s,
+                "    private boolean shouldTopicBreak(String text) {",
+                "    private void appendRaw(String segment) {",
+                topicMethod,
+                "topic breaks")
+
+        serviceFile.write(s, "UTF-8")
+    }
+}
