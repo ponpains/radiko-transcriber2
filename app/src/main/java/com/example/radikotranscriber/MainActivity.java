@@ -42,6 +42,7 @@ public class MainActivity extends AppCompatActivity {
     private DiagnosticStore diagnostics;
     private int pendingMode = MODE_NONE;
     private long activeEpisodeId = -1L;
+    private long pendingEpisodeId = -1L;
     private boolean serviceRunning = false;
     private boolean applyingServiceText = false;
     private boolean userModifiedDuringRun = false;
@@ -102,6 +103,7 @@ public class MainActivity extends AppCompatActivity {
                 if (!granted) {
                     status.setText("音声認識に必要なマイク権限がありません。");
                     pendingMode = MODE_NONE;
+                    pendingEpisodeId = -1L;
                 } else continuePendingStart();
             });
 
@@ -113,9 +115,10 @@ public class MainActivity extends AppCompatActivity {
                 if (result.getResultCode() != Activity.RESULT_OK || result.getData() == null) {
                     status.setText("画面共有の許可がキャンセルされました。");
                     pendingMode = MODE_NONE;
+                    pendingEpisodeId = -1L;
                     return;
                 }
-                long id = ensureEpisode();
+                long id = pendingEpisodeId > 0 ? pendingEpisodeId : prepareEpisodeForStart();
                 Intent service = new Intent(this, TranscribeService.class);
                 service.setAction(TranscribeService.ACTION_START_INTERNAL);
                 service.putExtra("episodeId", id);
@@ -126,6 +129,7 @@ public class MainActivity extends AppCompatActivity {
                 ContextCompat.startForegroundService(this, service);
                 status.setText("文字起こしを開始しています… 再生画面を開きます。");
                 pendingMode = MODE_NONE;
+                pendingEpisodeId = -1L;
                 userModifiedDuringRun = false;
                 transcript.clearFocus();
                 new Handler(Looper.getMainLooper()).postDelayed(this::openPlaybackTarget, 700L);
@@ -224,9 +228,11 @@ public class MainActivity extends AppCompatActivity {
         else registerReceiver(receiver, filter);
 
         renderRecentEpisodes();
+        // Normal launch should be ready for a NEW transcription, not an old transcript.
+        // If a service is already alive, syncRuntimeState() immediately replaces this with that run.
         ArrayList<EpisodeStore.Episode> all = store.listEpisodes("");
-        if (!all.isEmpty()) loadEpisode(all.get(0));
-        else newEpisode();
+        if (!all.isEmpty()) programInput.setText(all.get(0).program);
+        newEpisode();
         syncRuntimeState();
 
         if (Build.VERSION.SDK_INT >= 33
@@ -345,7 +351,7 @@ public class MainActivity extends AppCompatActivity {
             return;
         }
         pendingMode = mode;
-        ensureEpisode();
+        pendingEpisodeId = prepareEpisodeForStart();
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
                 != PackageManager.PERMISSION_GRANTED) {
             recordPermission.launch(Manifest.permission.RECORD_AUDIO);
@@ -356,7 +362,7 @@ public class MainActivity extends AppCompatActivity {
         if (pendingMode == MODE_INTERNAL) {
             projectionPermission.launch(projectionManager.createScreenCaptureIntent());
         } else if (pendingMode == MODE_MIC) {
-            long id = ensureEpisode();
+            long id = pendingEpisodeId > 0 ? pendingEpisodeId : prepareEpisodeForStart();
             Intent s = new Intent(this, TranscribeService.class);
             s.setAction(TranscribeService.ACTION_START_MIC);
             s.putExtra("episodeId", id);
@@ -364,6 +370,7 @@ public class MainActivity extends AppCompatActivity {
             s.putExtra("autoStop", autoStopCheck.isChecked());
             ContextCompat.startForegroundService(this, s);
             pendingMode = MODE_NONE;
+            pendingEpisodeId = -1L;
             userModifiedDuringRun = false;
             transcript.clearFocus();
             new Handler(Looper.getMainLooper()).postDelayed(this::openPlaybackTarget, 700L);
@@ -381,6 +388,65 @@ public class MainActivity extends AppCompatActivity {
 
     private String speedLabel(float s) {
         return s >= 1.9f ? "2.0xバッファ" : s >= 1.4f ? "1.5xバッファ" : "1.0x";
+    }
+
+    /**
+     * Prepares a run without reusing the previous episode's transcript.
+     * The old UI used the most recently loaded archive row as the next run. If only the URL was
+     * changed, the new speech was appended to the previous transcript. A different URL now means
+     * a fresh episode whenever the current row already contains a completed/real recording.
+     */
+    private long prepareEpisodeForStart() {
+        String p = programInput.getText().toString().trim();
+        String t = episodeInput.getText().toString().trim();
+        String u = urlInput.getText().toString().trim();
+        if (t.isEmpty()) t = "名称未入力の回";
+
+        EpisodeStore.Episode previous = activeEpisodeId > 0 ? store.getEpisode(activeEpisodeId) : null;
+        boolean hasPreviousRecording = previous != null && (
+                !previous.transcript.trim().isEmpty()
+                        || !previous.rawTranscript.trim().isEmpty()
+                        || !"saved".equals(previous.status));
+        boolean differentUrl = previous != null && !sameEpisodeUrl(previous.url, u);
+
+        if (previous == null || (hasPreviousRecording && differentUrl)) {
+            long oldId = previous == null ? -1L : previous.id;
+            if (previous != null && !serviceRunning) {
+                // Preserve edits to the OLD transcript, but never overwrite its URL/title with the
+                // new form values. The form now describes the next episode.
+                store.updateEditedTranscript(previous.id, transcript.getText().toString());
+            }
+            activeEpisodeId = store.createEpisode(p, t, u);
+            clearTranscriptForFreshEpisode();
+            diagnostics.log(activeEpisodeId, "ui_new_episode_auto",
+                    "reason=" + (oldId > 0 ? "url_changed" : "no_active_episode")
+                            + ";previousEpisodeId=" + oldId);
+        } else {
+            store.updateMeta(activeEpisodeId, p, t, u);
+            if (!serviceRunning) store.updateEditedTranscript(activeEpisodeId, transcript.getText().toString());
+        }
+        updateCurrentLabel();
+        renderRecentEpisodes();
+        return activeEpisodeId;
+    }
+
+    private boolean sameEpisodeUrl(String a, String b) {
+        String x = a == null ? "" : a.trim();
+        String y = b == null ? "" : b.trim();
+        while (x.endsWith("/")) x = x.substring(0, x.length() - 1);
+        while (y.endsWith("/")) y = y.substring(0, y.length() - 1);
+        return x.equals(y);
+    }
+
+    private void clearTranscriptForFreshEpisode() {
+        applyingServiceText = true;
+        try { transcript.setText(""); }
+        finally { applyingServiceText = false; }
+        lastServiceText = "";
+        userModifiedDuringRun = false;
+        correctionHint.setText("この回の文字起こしを開始します。前の回の本文は引き継ぎません。");
+        meter.setText("待機中");
+        playbackPanel.setText("再生位置：—");
     }
 
     private long ensureEpisode() {
@@ -407,13 +473,14 @@ public class MainActivity extends AppCompatActivity {
         String keep = programInput == null ? "" : programInput.getText().toString().trim();
         saveCurrentEdits();
         activeEpisodeId = -1L;
+        pendingEpisodeId = -1L;
         programInput.setText(keep);
         episodeInput.setText("");
         urlInput.setText("");
         applyingServiceText = true;
         try { transcript.setText(""); } finally { applyingServiceText = false; }
         setPlaybackSpeed(1.0f);
-        correctionHint.setText("停止後に固有名詞などを直して「この修正を学習」を押すと次回から補正します。");
+        correctionHint.setText("停止後に固有名詞や改行・段落を直すと、次回から学習します。");
         status.setText("新しい回を準備中。URLを貼って開始してください。");
         meter.setText("待機中");
         playbackPanel.setText("再生位置：—");
@@ -424,6 +491,7 @@ public class MainActivity extends AppCompatActivity {
         if (e == null || serviceRunning) return;
         saveCurrentEdits();
         activeEpisodeId = e.id;
+        pendingEpisodeId = -1L;
         programInput.setText(e.program);
         episodeInput.setText(e.title);
         urlInput.setText(e.url);
@@ -444,8 +512,8 @@ public class MainActivity extends AppCompatActivity {
         if (serviceRunning || activeEpisodeId <= 0) return;
         int n = store.learnCorrectionsFromEdit(activeEpisodeId, transcript.getText().toString());
         store.autoBackup(this);
-        correctionHint.setText(n > 0 ? n + "件の修正を学習しました。"
-                : "学習できる小さな表記修正は見つかりませんでした。");
+        correctionHint.setText(n > 0 ? n + "件の表記・改行傾向を学習しました。"
+                : "新しく学習できる変更は見つかりませんでした。");
         Toast.makeText(this, n > 0 ? n + "件を学習" : "学習対象なし", Toast.LENGTH_LONG).show();
         renderRecentEpisodes();
     }
@@ -537,6 +605,12 @@ public class MainActivity extends AppCompatActivity {
         }
         Intent i = new Intent(this, InAppBrowserActivity.class);
         i.putExtra("url", u.toString());
+        if (activeEpisodeId > 0) {
+            EpisodeStore.Episode e = store.getEpisode(activeEpisodeId);
+            if (serviceRunning || (e != null && sameEpisodeUrl(e.url, u.toString()))) {
+                i.putExtra("episodeId", activeEpisodeId);
+            }
+        }
         try {
             startActivity(i);
         } catch (Exception e) {
