@@ -1,0 +1,767 @@
+// v0.19 incremental patch. Runs after the v0.18 source patch and compile fix.
+// Priorities from the v0.18 diagnostic:
+// 1) do not treat bytes written to a recognizer pipe as safely recognized;
+// 2) freeze/replay audio across recognizer rotation and ignore expected stop callbacks;
+// 3) merge cumulative segment/final results before commit;
+// 4) format roughly one spoken sentence per line;
+// 5) strengthen the kerekere-specific context profile.
+
+def replaceRange = { String text, String startMarker, String endMarker, String replacement, String label ->
+    int a = text.indexOf(startMarker)
+    if (a < 0) throw new GradleException("v0.19 patch: start marker not found: " + label)
+    int b = text.indexOf(endMarker, a)
+    if (b < 0) throw new GradleException("v0.19 patch: end marker not found: " + label)
+    return text.substring(0, a) + replacement + text.substring(b)
+}
+
+tasks.named("preBuild").configure {
+    doLast {
+        File serviceFile = file("src/main/java/com/example/radikotranscriber/TranscribeService.java")
+        String s = serviceFile.getText("UTF-8")
+
+        // Recognition transport/checkpoint state. spoolBytesConsumed remains monotonic for the
+        // capture-complete invariant; feederReadOffset is the actual current recognizer feed point.
+        if (!s.contains("private volatile long safeCommittedOffset")) {
+            s = s.replace(
+                    "    private HighSpeedSonicProcessor highSpeedProcessor;\n",
+                    "    private HighSpeedSonicProcessor highSpeedProcessor;\n" +
+                    "    private static final long REPLAY_RAW_MS = 2600L;\n" +
+                    "    private volatile boolean recognizerReady = false;\n" +
+                    "    private volatile long feederReadOffset = 0L;\n" +
+                    "    private volatile long safeCommittedOffset = 0L;\n" +
+                    "    private volatile long requestedReplayOffset = -1L;\n" +
+                    "    private volatile long generationFeedStartOffset = 0L;\n" +
+                    "    private volatile long generationFeedEndOffset = 0L;\n" +
+                    "    private volatile boolean generationHadResult = false;\n" +
+                    "    private volatile boolean plannedRotationRequested = false;\n" +
+                    "    private volatile int plannedStopGeneration = -1;\n" +
+                    "    private volatile int staleCallbackIgnored = 0;\n" +
+                    "    private volatile int currentRotationId = 0;\n" +
+                    "    private volatile int rotationReconnectCount = 0;\n" +
+                    "    private volatile int lastRotationReconnectCount = 0;\n")
+        }
+
+        // Reset all transport state at a fresh recording.
+        s = s.replace(
+                "        spoolBytesConsumed = 0L;\n        frozenDurationMs = 0L;",
+                "        spoolBytesConsumed = 0L;\n" +
+                "        feederReadOffset = 0L;\n" +
+                "        safeCommittedOffset = 0L;\n" +
+                "        requestedReplayOffset = -1L;\n" +
+                "        generationFeedStartOffset = 0L;\n" +
+                "        generationFeedEndOffset = 0L;\n" +
+                "        generationHadResult = false;\n" +
+                "        recognizerReady = false;\n" +
+                "        plannedRotationRequested = false;\n" +
+                "        plannedStopGeneration = -1;\n" +
+                "        staleCallbackIgnored = 0;\n" +
+                "        currentRotationId = 0;\n" +
+                "        rotationReconnectCount = 0;\n" +
+                "        lastRotationReconnectCount = 0;\n" +
+                "        frozenDurationMs = 0L;")
+
+        // Planned watchdog rotation must not commit partial text. It freezes the feeder immediately
+        // and schedules a replay checkpoint instead.
+        String watchdogOld = '''                flushPartialForRecovery();
+                // v0.13 diagnostics showed repeated server-disconnected errors when a new session
+                // was created only ~180ms after a planned rollover. The audio spool lets us wait.
+                requestRecognizerRestart("認識器を安全に更新しています…", 2200L);'''
+        String watchdogNew = '''                requestRecognizerRestart("認識器を安全に更新しています…", 2200L, true);'''
+        if (s.contains(watchdogOld)) s = s.replace(watchdogOld, watchdogNew)
+        else {
+            s = s.replace(
+                    "                flushPartialForRecovery();\n                requestRecognizerRestart(\"認識器を安全に更新しています…\", 2200L);",
+                    "                requestRecognizerRestart(\"認識器を安全に更新しています…\", 2200L, true);")
+        }
+
+        String recognizerMethods = '''    private void startRecognizerSession(boolean recovery) {
+        mainHandler.post(() -> {
+            if (!running || drainComplete) return;
+            restartScheduled = false;
+            recognizerReady = false;
+            recognizerGeneration++;
+            final int generation = recognizerGeneration;
+            final boolean rotationStart = plannedRotationRequested;
+            if (recovery) reconnectCount++;
+            if (rotationStart) rotationReconnectCount++;
+            generationHadResult = false;
+            generationFeedStartOffset = feederReadOffset;
+            generationFeedEndOffset = feederReadOffset;
+
+            destroyRecognizerOnly();
+            closePipe();
+            try {
+                ParcelFileDescriptor[] pipe = ParcelFileDescriptor.createPipe();
+                synchronized (pipeLock) {
+                    readFd = pipe[0];
+                    writeFd = pipe[1];
+                    pipeOut = new ParcelFileDescriptor.AutoCloseOutputStream(writeFd);
+                }
+
+                recognizer = SpeechRecognizer.createSpeechRecognizer(this);
+                recognizer.setRecognitionListener(new RecognitionListener() {
+                    private boolean current(String callback) {
+                        if (!running) return false;
+                        if (generation != recognizerGeneration) {
+                            staleCallbackIgnored++;
+                            diag("stale_callback_ignored", "callback=" + callback
+                                    + ";callbackGeneration=" + generation
+                                    + ";activeGeneration=" + recognizerGeneration
+                                    + ";plannedStop=" + (generation == plannedStopGeneration)
+                                    + ";count=" + staleCallbackIgnored);
+                            return false;
+                        }
+                        return true;
+                    }
+                    private void touch() {
+                        if (generation == recognizerGeneration) lastRecognizerCallbackAt = System.currentTimeMillis();
+                    }
+
+                    @Override public void onReadyForSpeech(Bundle params) {
+                        if (!current("ready")) return;
+                        touch();
+                        recognizerReady = true;
+                        generationFeedStartOffset = feederReadOffset;
+                        if (rotationStart) {
+                            lastRotationReconnectCount = rotationReconnectCount;
+                            plannedRotationRequested = false;
+                        }
+                        diag("recognizer_ready", "generation=" + generation
+                                + ";activeGeneration=" + recognizerGeneration
+                                + ";rotationId=" + currentRotationId
+                                + ";rotationReconnects=" + rotationReconnectCount
+                                + ";feedOffset=" + feederReadOffset
+                                + ";safeOffset=" + safeCommittedOffset);
+                    }
+                    @Override public void onBeginningOfSpeech() { if (current("begin")) touch(); }
+                    @Override public void onRmsChanged(float rmsdB) {}
+                    @Override public void onBufferReceived(byte[] buffer) { if (current("buffer")) touch(); }
+                    @Override public void onEndOfSpeech() { if (current("end_speech")) touch(); }
+
+                    @Override public void onError(int error) {
+                        if (!current("error")) return;
+                        touch();
+                        long age = Math.max(0L, System.currentTimeMillis() - recognizerSessionStartedAt);
+                        boolean expectedStop = restartScheduled && generation == plannedStopGeneration;
+                        diag("recognizer_error", "generation=" + generation
+                                + ";activeGeneration=" + recognizerGeneration
+                                + ";code=" + error + ";name=" + errorName(error)
+                                + ";plannedStop=" + expectedStop
+                                + ";ready=" + recognizerReady
+                                + ";ageMs=" + age
+                                + ";sourceFinished=" + sourceFinished
+                                + ";drainComplete=" + drainComplete
+                                + ";feedStart=" + generationFeedStartOffset
+                                + ";feedEnd=" + generationFeedEndOffset
+                                + ";safeOffset=" + safeCommittedOffset
+                                + ";backlogMs=" + bufferedBacklogMs());
+
+                        // Once a stop/restart is already scheduled, a disconnect from that same
+                        // recognizer is an expected teardown callback, not a second failure.
+                        if (expectedStop) {
+                            diag("planned_stop_callback_ignored", "generation=" + generation
+                                    + ";error=" + errorName(error));
+                            return;
+                        }
+                        if (drainComplete) {
+                            scheduleFinishAfterDrain(900L);
+                            return;
+                        }
+                        if (error == SpeechRecognizer.ERROR_LANGUAGE_NOT_SUPPORTED
+                                || error == SpeechRecognizer.ERROR_LANGUAGE_UNAVAILABLE) {
+                            stopEverything("日本語の音声認識を利用できません。", "error", "language_error");
+                            return;
+                        }
+
+                        // A provider disconnect arriving immediately after a planned rotation often
+                        // precedes onReady by only a few milliseconds. Do not turn it into a second
+                        // reconnect; wait briefly for ready, then recover only if ready never comes.
+                        if ((error == SpeechRecognizer.ERROR_SERVER_DISCONNECTED
+                                || error == SpeechRecognizer.ERROR_SERVER)
+                                && recovery && !recognizerReady && age < 1200L) {
+                            final int checkGeneration = generation;
+                            diag("startup_disconnect_deferred", "generation=" + generation
+                                    + ";rotationId=" + currentRotationId);
+                            mainHandler.postDelayed(() -> {
+                                if (!running || drainComplete || checkGeneration != recognizerGeneration) return;
+                                if (!recognizerReady && !restartScheduled) {
+                                    requestReplayFromSafe("startup_disconnect_no_ready", 3200L);
+                                    requestRecognizerRestart("認識器の起動をやり直しています…", 900L, false);
+                                }
+                            }, 1400L);
+                            return;
+                        }
+
+                        permissionErrorRetries = error == SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS
+                                ? permissionErrorRetries + 1 : 0;
+                        if (error == SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS
+                                && permissionErrorRetries > 5) {
+                            stopEverything("音声認識の権限を維持できませんでした。アプリを開いて再開してください。",
+                                    "error", "recognizer_permission_error");
+                            return;
+                        }
+
+                        partialText = "";
+                        requestReplayFromSafe("recognizer_error_" + errorName(error),
+                                generationHadResult ? 2200L : 3400L);
+                        long delay;
+                        if (error == SpeechRecognizer.ERROR_RECOGNIZER_BUSY) delay = 1400L;
+                        else if (error == SpeechRecognizer.ERROR_SERVER_DISCONNECTED
+                                || error == SpeechRecognizer.ERROR_SERVER) delay = 2000L;
+                        else if (error == SpeechRecognizer.ERROR_NO_MATCH
+                                || error == SpeechRecognizer.ERROR_SPEECH_TIMEOUT) delay = 800L;
+                        else delay = 1000L;
+                        requestRecognizerRestart("認識が途切れたため安全位置から再認識しています…", delay, false);
+                    }
+
+                    @Override public void onResults(Bundle results) {
+                        if (!current("final")) return;
+                        touch();
+                        permissionErrorRetries = 0;
+                        boolean usable = hasUsableRecognition(results);
+                        if (usable) {
+                            appendBest(results, "final");
+                            markRecognitionConfirmed(generation, "final");
+                        } else {
+                            diag("recognition_empty", "source=final;generation=" + generation
+                                    + ";feedStart=" + generationFeedStartOffset
+                                    + ";feedEnd=" + generationFeedEndOffset
+                                    + ";peak=" + peak);
+                            if (generationFeedEndOffset - generationFeedStartOffset > rawBytesForMs(500L))
+                                requestReplayFromSafe("empty_final", 3000L);
+                        }
+                        if (drainComplete) scheduleFinishAfterDrain(900L);
+                        else requestRecognizerRestart("次の認識区間へ接続中…", 700L, false);
+                    }
+
+                    @Override public void onPartialResults(Bundle partialResults) {
+                        if (!current("partial")) return;
+                        touch();
+                        ArrayList<String> list = partialResults.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION);
+                        if (list != null && !list.isEmpty()) {
+                            partialText = chooseBestCandidateWithContext(list, null);
+                            broadcast(bufferedStatusText(), true);
+                        }
+                    }
+
+                    @Override public void onEvent(int eventType, Bundle params) {}
+                    @Override public void onSegmentResults(Bundle segmentResults) {
+                        if (!current("segment")) return;
+                        touch();
+                        permissionErrorRetries = 0;
+                        if (hasUsableRecognition(segmentResults)) {
+                            appendBest(segmentResults, "segment");
+                            markRecognitionConfirmed(generation, "segment");
+                        } else {
+                            diag("recognition_empty", "source=segment;generation=" + generation
+                                    + ";feedStart=" + generationFeedStartOffset
+                                    + ";feedEnd=" + generationFeedEndOffset
+                                    + ";peak=" + peak);
+                        }
+                    }
+                    @Override public void onEndOfSegmentedSession() {
+                        if (!current("end_segmented")) return;
+                        touch();
+                        // Partial text remains provisional. The next session replays a short overlap
+                        // so an unfinished phrase is recognized again instead of being blindly saved.
+                        partialText = "";
+                        if (drainComplete) scheduleFinishAfterDrain(900L);
+                        else requestRecognizerRestart("認識区間を更新しています…", 700L, false);
+                    }
+                    @Override public void onLanguageDetection(Bundle results) {}
+                });
+
+                Intent ri = new Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH);
+                ri.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM);
+                ri.putExtra(RecognizerIntent.EXTRA_LANGUAGE, "ja-JP");
+                ri.putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true);
+                ri.putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 8);
+                ri.putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE, readFd);
+                ri.putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE_CHANNEL_COUNT, 1);
+                ri.putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE_ENCODING, AudioFormat.ENCODING_PCM_16BIT);
+                ri.putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE_SAMPLING_RATE, SAMPLE_RATE);
+                ri.putExtra(RecognizerIntent.EXTRA_SEGMENTED_SESSION, RecognizerIntent.EXTRA_AUDIO_SOURCE);
+                ri.putExtra(RecognizerIntent.EXTRA_MASK_OFFENSIVE_WORDS, false);
+                ri.putStringArrayListExtra(RecognizerIntent.EXTRA_BIASING_STRINGS,
+                        store.getBiasStrings(program, episodeTitle + " " + episodeHints));
+                ri.putExtra(RecognizerIntent.EXTRA_ENABLE_FORMATTING,
+                        RecognizerIntent.FORMATTING_OPTIMIZE_QUALITY);
+                ri.putExtra(RecognizerIntent.EXTRA_HIDE_PARTIAL_TRAILING_PUNCTUATION, true);
+
+                recognizerSessionStartedAt = System.currentTimeMillis();
+                lastRecognizerCallbackAt = recognizerSessionStartedAt;
+                diag("recognizer_session_start", "generation=" + generation
+                        + ";activeGeneration=" + recognizerGeneration
+                        + ";recovery=" + recovery
+                        + ";plannedRotation=" + rotationStart
+                        + ";rotationId=" + currentRotationId
+                        + ";rotationReconnects=" + rotationReconnectCount
+                        + ";feedOffset=" + feederReadOffset
+                        + ";safeOffset=" + safeCommittedOffset
+                        + ";backlogMs=" + bufferedBacklogMs());
+                recognizer.startListening(ri);
+                if (recovery) broadcast(bufferedStatusText(), true);
+            } catch (Exception e) {
+                recognizerReady = false;
+                diag("recognizer_session_exception", e.getClass().getSimpleName() + ":" + e.getMessage());
+                if (running && !drainComplete) {
+                    requestReplayFromSafe("session_exception", 3200L);
+                    requestRecognizerRestart("認識器を再接続しています…", 1500L, false);
+                }
+            }
+        });
+    }
+
+    private void requestRecognizerRestart(String statusText, long delayMs) {
+        requestRecognizerRestart(statusText, delayMs, false);
+    }
+
+    private void requestRecognizerRestart(String statusText, long delayMs, boolean planned) {
+        if (!running || restartScheduled || drainComplete) return;
+        restartScheduled = true;
+        recognizerReady = false;
+        plannedStopGeneration = recognizerGeneration;
+        if (planned) {
+            plannedRotationRequested = true;
+            currentRotationId++;
+            rotationReconnectCount = 0;
+            requestReplayFromSafe("planned_rotation", REPLAY_RAW_MS);
+        } else {
+            requestReplayFromSafe("session_boundary", generationHadResult ? 900L : 2200L);
+        }
+        diag("recognizer_restart_scheduled", "activeGeneration=" + recognizerGeneration
+                + ";planned=" + planned
+                + ";plannedStopGeneration=" + plannedStopGeneration
+                + ";delayMs=" + delayMs
+                + ";feedOffset=" + feederReadOffset
+                + ";safeOffset=" + safeCommittedOffset
+                + ";replayOffset=" + requestedReplayOffset);
+        broadcast(statusText, true);
+        int generation = recognizerGeneration;
+        mainHandler.postDelayed(() -> {
+            if (!running || drainComplete) return;
+            if (generation != recognizerGeneration) {
+                restartScheduled = false;
+                return;
+            }
+            startRecognizerSession(true);
+        }, delayMs);
+    }
+
+    private boolean hasUsableRecognition(Bundle b) {
+        if (b == null) return false;
+        ArrayList<String> list = b.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION);
+        if (list == null || list.isEmpty()) return false;
+        for (String x : list) if (x != null && !x.trim().isEmpty()) return true;
+        return false;
+    }
+
+    private void markRecognitionConfirmed(int generation, String source) {
+        if (generation != recognizerGeneration) return;
+        generationHadResult = true;
+        long margin = rawBytesForMs(600L);
+        long confirmed = Math.max(generationFeedStartOffset,
+                Math.max(0L, generationFeedEndOffset - margin));
+        if (confirmed > safeCommittedOffset) safeCommittedOffset = confirmed;
+        diag("recognition_checkpoint", "source=" + source
+                + ";activeGeneration=" + recognizerGeneration
+                + ";feedStart=" + generationFeedStartOffset
+                + ";feedEnd=" + generationFeedEndOffset
+                + ";safeOffset=" + safeCommittedOffset);
+    }
+
+    private long rawBytesForMs(long ms) {
+        long bytes = Math.round(Math.max(0L, ms) * SAMPLE_RATE * 2.0 / 1000.0);
+        return bytes - (bytes & 1L);
+    }
+
+    private void requestReplayFromSafe(String reason, long overlapMs) {
+        long base = Math.max(0L, safeCommittedOffset - rawBytesForMs(overlapMs));
+        long current = requestedReplayOffset;
+        if (current < 0L || base < current) requestedReplayOffset = base;
+        diag("recognizer_replay_requested", "reason=" + reason
+                + ";activeGeneration=" + recognizerGeneration
+                + ";feedOffset=" + feederReadOffset
+                + ";safeOffset=" + safeCommittedOffset
+                + ";rollbackOffset=" + requestedReplayOffset
+                + ";replayMs=" + overlapMs);
+    }
+
+'''
+        s = replaceRange(s,
+                "    private void startRecognizerSession(boolean recovery) {",
+                "    private void appendBest(Bundle b, String source) {",
+                recognizerMethods,
+                "lossless recognizer session methods")
+
+        // Candidate scoring gets a second program-specific layer learned from the corrected v0.18
+        // transcript. It influences candidate choice without creating global blind replacements.
+        if (!s.contains("KerekereContextBoost.scoreCandidate")) {
+            s = s.replace(
+                    "            score += KerekereContextProfile.scoreCandidate(program, c, finalText);",
+                    "            score += KerekereContextProfile.scoreCandidate(program, c, finalText);\n" +
+                    "            score += KerekereContextBoost.scoreCandidate(program, c, finalText);")
+        }
+
+        String flushMethod = '''    private void flushPartialForRecovery() {
+        String p = partialText == null ? "" : partialText.trim();
+        partialText = "";
+        if (p.length() < 2) return;
+        if (sourceFinished && drainComplete) {
+            diag("partial_final_fallback", "chars=" + p.length()
+                    + ";feedOffset=" + feederReadOffset + ";safeOffset=" + safeCommittedOffset);
+            commitText(p, p, "final_partial");
+        } else {
+            // Do not commit provisional cumulative text at a rotation. The checkpoint replay will
+            // send the audio again and a segment/final result will replace it safely.
+            diag("partial_deferred", "chars=" + p.length()
+                    + ";activeGeneration=" + recognizerGeneration
+                    + ";feedOffset=" + feederReadOffset);
+        }
+    }
+
+'''
+        s = replaceRange(s,
+                "    private void flushPartialForRecovery() {",
+                "    private void commitText(String rawSegment, String selected, String source) {",
+                flushMethod,
+                "partial recovery behavior")
+
+        String commitMethod = '''    private void commitText(String rawSegment, String selected, String source) {
+        if (selected == null) return;
+        String lexical = store.applyCorrections(program, selected.trim()).trim();
+        String corrected = ContextCorrectionEngine.refine(program, finalText, lexical).trim();
+        rawSegment = rawSegment == null ? corrected : rawSegment.trim();
+        if (corrected.isEmpty()) return;
+
+        RecognitionTextMerger.MergeResult merge = RecognitionTextMerger.merge(finalText, corrected);
+        if (merge.duplicate) {
+            lastCommitted = corrected;
+            diag("dedupe_skip", merge.reason + ";chars=" + corrected.length()
+                    + ";overlap=" + merge.overlapCompactChars
+                    + ";similarity=" + String.format(Locale.US, "%.3f", merge.similarity)
+                    + ";source=" + source);
+            return;
+        }
+        String append = merge.append.trim();
+        if (append.isEmpty()) return;
+        if (merge.overlapCompactChars > 0) {
+            diag("dedupe_merge", "reason=" + merge.reason
+                    + ";candidateChars=" + corrected.length()
+                    + ";appendChars=" + append.length()
+                    + ";overlap=" + merge.overlapCompactChars
+                    + ";similarity=" + String.format(Locale.US, "%.3f", merge.similarity)
+                    + ";source=" + source);
+        }
+
+        // Raw transcript also receives cumulative recognizer results, so dedupe it independently.
+        RecognitionTextMerger.MergeResult rawMerge = RecognitionTextMerger.merge(rawText, rawSegment);
+        if (!rawMerge.duplicate && !rawMerge.append.trim().isEmpty()) appendRaw(rawMerge.append.trim());
+
+        long now = System.currentTimeMillis();
+        boolean paragraphFromSilence = pendingParagraphBreak;
+        boolean sentenceFromSilence = pendingSentenceBreak;
+        pendingParagraphBreak = false;
+        pendingSentenceBreak = false;
+
+        boolean topicBreak = paragraphFromSilence || shouldTopicBreak(append)
+                || TranscriptSentenceFormatter.isTopicStarter(append);
+        appendReadable(append, topicBreak, sentenceFromSilence,
+                !"recovery".equals(source) && !"final_partial".equals(source));
+
+        long mediaEnd = Math.max(lastSegmentEndMs, currentRecognitionMediaPositionMs());
+        long estimated = Math.max(900L, Math.min(12000L, append.length() * 135L));
+        long segmentStart = lastSegmentEndMs > 0
+                ? lastSegmentEndMs : Math.max(mediaStartMs, mediaEnd - estimated);
+        if (segmentStart > mediaEnd) segmentStart = mediaEnd;
+        if (currentEpisodeId > 0) {
+            store.addSegment(currentEpisodeId, segmentStart, mediaEnd,
+                    rawMerge.duplicate ? rawSegment : rawMerge.append, append, topicBreak);
+        }
+        lastSegmentEndMs = mediaEnd;
+        lastCommitWallAt = now;
+        lastCommitted = corrected;
+        if (!rawSegment.equals(corrected)) {
+            diag("correction_applied", "raw=" + ContextCorrectionEngine.brief(rawSegment)
+                    + ";final=" + ContextCorrectionEngine.brief(corrected));
+        }
+        diag("commit", "startMs=" + segmentStart + ";endMs=" + mediaEnd
+                + ";chars=" + append.length() + ";topicBreak=" + topicBreak
+                + ";paragraphBreakFromSilence=" + paragraphFromSilence
+                + ";source=" + source
+                + ";activeGeneration=" + recognizerGeneration
+                + ";feedOffset=" + feederReadOffset
+                + ";safeOffset=" + safeCommittedOffset
+                + ";dedupe=" + merge.reason);
+        if (currentEpisodeId > 0) {
+            store.updateRecognition(currentEpisodeId, rawText, finalText,
+                    "recording", playbackSpeed, currentDurationMs());
+        }
+        broadcast(bufferedStatusText(), true);
+    }
+
+'''
+        s = replaceRange(s,
+                "    private void commitText(String rawSegment, String selected, String source) {",
+                "    private boolean shouldTopicBreak(String text) {",
+                commitMethod,
+                "fuzzy commit merge")
+
+        String readableMethod = '''    private void appendReadable(String text, boolean topicBreak,
+                                boolean sentenceFromSilence, boolean utteranceBoundary) {
+        String formatted = TranscriptSentenceFormatter.formatBlock(text,
+                utteranceBoundary || sentenceFromSilence);
+        if (formatted.isEmpty()) return;
+
+        if (sentenceFromSilence && !finalText.isEmpty()
+                && !endsWithSentencePunctuation(finalText)
+                && !finalText.endsWith("\\n")) {
+            finalText += "。";
+        }
+
+        String[] lines = formatted.split("\\n");
+        boolean first = true;
+        for (String line : lines) {
+            line = line.trim();
+            if (line.isEmpty()) continue;
+            boolean paragraph = !finalText.isEmpty()
+                    && ((first && topicBreak) || TranscriptSentenceFormatter.isTopicStarter(line));
+            if (!finalText.isEmpty()) {
+                if (paragraph) {
+                    if (!finalText.endsWith("\\n\\n")) {
+                        if (finalText.endsWith("\\n")) finalText += "\\n";
+                        else finalText += "\\n\\n";
+                    }
+                } else if (!finalText.endsWith("\\n")) {
+                    finalText += "\\n";
+                }
+            }
+            finalText += line;
+            first = false;
+        }
+    }
+
+'''
+        s = replaceRange(s,
+                "    private void appendReadable(String text, boolean topicBreak,",
+                "    private boolean looksLikeOpenEndedFragment(String s) {",
+                readableMethod,
+                "sentence-per-line formatting")
+
+        String feederMethod = '''    private void startBufferedFeeder() {
+        feederThread = new Thread(() -> {
+            long pos = 0L;
+            byte[] raw = new byte[16384];
+            long lastStatus = 0L;
+            try (RandomAccessFile raf = new RandomAccessFile(spoolFile, "r")) {
+                while (running && !drainComplete) {
+                    long replay = requestedReplayOffset;
+                    if (replay >= 0L) {
+                        requestedReplayOffset = -1L;
+                        long target = Math.max(0L, Math.min(replay, spoolBytesWritten));
+                        if (target < pos) {
+                            long old = pos;
+                            pos = target;
+                            feederReadOffset = pos;
+                            rewindBreakMarkersTo(pos);
+                            resetHighSpeedProcessorForReplay();
+                            diag("recognizer_replay", "from=" + old + ";to=" + pos
+                                    + ";bytes=" + (old - pos)
+                                    + ";ms=" + Math.round((old - pos) * 1000.0 / (SAMPLE_RATE * 2.0))
+                                    + ";activeGeneration=" + recognizerGeneration
+                                    + ";safeOffset=" + safeCommittedOffset);
+                        }
+                    }
+
+                    // Writing into a pipe before the provider reports ready was the key loss window
+                    // in the v0.18 diagnostics. Capture continues to spool while the feeder waits.
+                    if (!recognizerReady) {
+                        sleepQuietly(20L);
+                        continue;
+                    }
+
+                    long available = spoolBytesWritten - pos;
+                    if (available < 2L) {
+                        if (sourceFinished) {
+                            finishHighSpeedProcessorToPipe();
+                            markDrainComplete();
+                            break;
+                        }
+                        sleepQuietly(25L);
+                        continue;
+                    }
+
+                    int want = (int)Math.min(raw.length, available);
+                    if ((want & 1) != 0) want--;
+                    if (want <= 0) {
+                        sleepQuietly(20L);
+                        continue;
+                    }
+                    raf.seek(pos);
+                    int got = raf.read(raw, 0, want);
+                    if (got <= 0) {
+                        sleepQuietly(20L);
+                        continue;
+                    }
+                    if ((got & 1) != 0) got--;
+                    short[] samples = new short[got / 2];
+                    for (int i = 0; i < samples.length; i++) {
+                        samples[i] = (short)((raw[i * 2] & 0xff) | (raw[i * 2 + 1] << 8));
+                    }
+                    byte[] encoded = encodeForRecognizer(samples, samples.length, playbackSpeed);
+
+                    int feedGeneration = recognizerGeneration;
+                    long feedStart = pos;
+                    long feedEnd = pos + got;
+                    boolean sent = writeRecognizerBytesForGeneration(encoded, feedGeneration,
+                            feedStart, feedEnd);
+                    if (!sent) {
+                        requestReplayFromSafe("feed_generation_changed", 3000L);
+                        continue;
+                    }
+
+                    pos = feedEnd;
+                    feederReadOffset = pos;
+                    generationFeedEndOffset = Math.max(generationFeedEndOffset, pos);
+                    spoolBytesConsumed = Math.max(spoolBytesConsumed, pos);
+                    applyBreakMarkers(pos);
+
+                    long now = System.currentTimeMillis();
+                    if (now - lastStatus > 1500L) {
+                        String status = bufferedStatusText();
+                        broadcast(status, true);
+                        updateNotification(status);
+                        lastStatus = now;
+                    }
+                }
+            } catch (Exception e) {
+                diag("buffered_feeder_error", e.getClass().getSimpleName() + ":" + e.getMessage());
+                if (running) mainHandler.post(() -> {
+                    if (sourceFinished) stopEverything("音声の残り処理中にエラーが起きました。途中まで保存しました。",
+                            "error", "buffered_feeder_error");
+                });
+            }
+        }, "BufferedAudioFeeder");
+        feederThread.start();
+    }
+
+    private boolean writeRecognizerBytesForGeneration(byte[] data, int generation,
+                                                        long rawStart, long rawEnd) {
+        if (data == null || data.length == 0) return true;
+        int offset = 0;
+        while (running && offset < data.length && !drainComplete) {
+            if (!recognizerReady || generation != recognizerGeneration) {
+                diag("feed_aborted", "feedGeneration=" + generation
+                        + ";activeGeneration=" + recognizerGeneration
+                        + ";rawStart=" + rawStart + ";rawEnd=" + rawEnd
+                        + ";encodedSent=" + offset + "/" + data.length);
+                return false;
+            }
+            OutputStream target;
+            synchronized (pipeLock) { target = pipeOut; }
+            if (target == null) {
+                sleepQuietly(20L);
+                continue;
+            }
+            int len = Math.min(4096, data.length - offset);
+            try {
+                target.write(data, offset, len);
+                offset += len;
+            } catch (IOException e) {
+                diag("feeder_pipe_retry", "feedGeneration=" + generation
+                        + ";activeGeneration=" + recognizerGeneration
+                        + ";rawStart=" + rawStart + ";rawEnd=" + rawEnd
+                        + ";encodedSent=" + offset
+                        + ";error=" + e.getClass().getSimpleName());
+                return false;
+            }
+        }
+        if (offset >= data.length) {
+            diag("recognizer_feed", "generation=" + generation
+                    + ";startOffset=" + rawStart + ";endOffset=" + rawEnd
+                    + ";safeOffset=" + safeCommittedOffset);
+            return true;
+        }
+        return false;
+    }
+
+    private void rewindBreakMarkersTo(long offset) {
+        synchronized (breakLock) {
+            int i = 0;
+            while (i < breakMarkers.size() && breakMarkers.get(i).rawByteOffset <= offset) i++;
+            nextBreakMarker = i;
+            pendingParagraphBreak = false;
+            pendingSentenceBreak = false;
+        }
+    }
+
+    private void resetHighSpeedProcessorForReplay() {
+        if (!isHighSpeed()) return;
+        try { if (highSpeedProcessor != null) highSpeedProcessor.reset(); } catch (Exception ignored) {}
+        try {
+            highSpeedProcessor = new HighSpeedSonicProcessor(playbackSpeed);
+            diag("high_speed_processor_replay_reset", "factor=" + playbackSpeed
+                    + ";feedOffset=" + feederReadOffset);
+        } catch (Exception e) {
+            highSpeedProcessor = null;
+            diag("high_speed_processor_replay_error", e.getClass().getSimpleName() + ":" + e.getMessage());
+        }
+    }
+
+'''
+        s = replaceRange(s,
+                "    private void startBufferedFeeder() {",
+                "    private String bufferedStatusText() {",
+                feederMethod,
+                "checkpoint buffered feeder")
+
+        // Real backlog/recognition position follows feederReadOffset, not the monotonic historical
+        // maximum spoolBytesConsumed. This makes rollback/replay visible in diagnostics and UI.
+        s = s.replace(
+                "        long rawAudioMs = Math.round(spoolBytesConsumed * 1000.0 / (SAMPLE_RATE * 2.0));",
+                "        long rawAudioMs = Math.round(feederReadOffset * 1000.0 / (SAMPLE_RATE * 2.0));")
+        s = s.replace(
+                "        long remain = Math.max(0L, spoolBytesWritten - spoolBytesConsumed);",
+                "        long remain = Math.max(0L, spoolBytesWritten - feederReadOffset);")
+
+        // Make the richer transport state visible in the session-stop diagnostic.
+        s = s.replace(
+                "                + \";written=\" + spoolBytesWritten + \";consumed=\" + spoolBytesConsumed);",
+                "                + \";written=\" + spoolBytesWritten + \";consumed=\" + spoolBytesConsumed\n" +
+                "                + \";feedOffset=\" + feederReadOffset + \";safeOffset=\" + safeCommittedOffset\n" +
+                "                + \";staleIgnored=\" + staleCallbackIgnored\n" +
+                "                + \";lastRotationReconnects=\" + lastRotationReconnectCount);")
+
+        // Session diagnostic identifies the context layer used for this run.
+        if (!s.contains("contextBoost=")) {
+            s = s.replace(
+                    "                + \";programContext=\" + KerekereContextProfile.describe(program));",
+                    "                + \";programContext=\" + KerekereContextProfile.describe(program)\n" +
+                    "                + \";contextBoost=\" + KerekereContextBoost.VERSION);")
+        }
+
+        serviceFile.write(s, "UTF-8")
+
+        // Add the corrected-episode vocabulary after the core kerekere vocabulary while keeping the
+        // recognizer bias list capped.
+        File episodeFile = file("src/main/java/com/example/radikotranscriber/EpisodeStore.java")
+        String e = episodeFile.getText("UTF-8")
+        if (!e.contains("KerekereContextBoost.biasTerms")) {
+            e = e.replace(
+                    "        if (set.size() < 50) addUsefulBias(set, safe(program));",
+                    "        for (String term : KerekereContextBoost.biasTerms(program)) {\n" +
+                    "            if (set.size() >= 50) break;\n" +
+                    "            set.add(term);\n" +
+                    "        }\n" +
+                    "        if (set.size() < 50) addUsefulBias(set, safe(program));")
+        }
+        episodeFile.write(e, "UTF-8")
+
+        File layout = file("src/main/res/layout/activity_main.xml")
+        String x = layout.getText("UTF-8")
+        x = x.replace("v0.18", "v0.19")
+        x = x.replace("けれけれ専用文脈 / 改行学習 / 診断ログ / バッファ認識",
+                "欠落防止 / 重複抑制 / 一文一行 / けれけれ専用文脈")
+        layout.write(x, "UTF-8")
+    }
+}
