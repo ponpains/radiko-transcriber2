@@ -1,0 +1,520 @@
+// v0.18 build-time source patch.
+// Includes v0.17 recognition/context changes and adds:
+// - external-browser-only playback flow
+// - automatic radiko episode metadata extraction
+// - utterance-oriented line breaks
+
+def replaceRange = { String text, String startMarker, String endMarker, String replacement, String label ->
+    int a = text.indexOf(startMarker)
+    if (a < 0) throw new GradleException("v0.18 patch: start marker not found: " + label)
+    int b = text.indexOf(endMarker, a)
+    if (b < 0) throw new GradleException("v0.18 patch: end marker not found: " + label)
+    return text.substring(0, a) + replacement + text.substring(b)
+}
+
+tasks.named("preBuild").configure {
+    doFirst {
+        File serviceFile = file("src/main/java/com/example/radikotranscriber/TranscribeService.java")
+        String s = serviceFile.getText("UTF-8")
+
+        if (!s.contains("private HighSpeedSonicProcessor highSpeedProcessor;")) {
+            s = s.replace(
+                    "    private DiagnosticStore diagnostics;\n",
+                    "    private DiagnosticStore diagnostics;\n    private HighSpeedSonicProcessor highSpeedProcessor;\n")
+        }
+
+        // Keep the proven spool architecture. The diagnostics showed capture itself completes, while
+        // recognizer sessions need periodic recovery.
+        s = s.replace("            long rollover = 65000L;", "            long rollover = 58000L;")
+        s = s.replace(
+                "                requestRecognizerRestart(\"認識器を安全に更新しています…\", 850L);",
+                "                requestRecognizerRestart(\"認識器を安全に更新しています…\", 2200L);")
+        s = s.replace(
+                "                        else if (error == SpeechRecognizer.ERROR_SERVER_DISCONNECTED\n                                || error == SpeechRecognizer.ERROR_SERVER) delay = 1000L;",
+                "                        else if (error == SpeechRecognizer.ERROR_SERVER_DISCONNECTED\n                                || error == SpeechRecognizer.ERROR_SERVER) delay = 2000L;")
+
+        if (!s.contains("engine=Media3Sonic")) {
+            s = s.replace(
+                    "        prepareSpool();\n        acquireWakeLock();",
+                    "        prepareSpool();\n        highSpeedProcessor = isHighSpeed() ? new HighSpeedSonicProcessor(playbackSpeed) : null;\n        if (highSpeedProcessor != null) diag(\"high_speed_processor\", \"engine=Media3Sonic;factor=\" + playbackSpeed);\n        acquireWakeLock();")
+        }
+
+        if (!s.contains("programContext=")) {
+            s = s.replace(
+                    "                + \";autoStop=\" + autoStopEnabled + \";bufferedCapture=true\"\n                + \";format=\" + FormatLearningStore.describe(this, program));",
+                    "                + \";autoStop=\" + autoStopEnabled + \";bufferedCapture=true\"\n                + \";format=\" + FormatLearningStore.describe(this, program)\n                + \";programContext=\" + KerekereContextProfile.describe(program));")
+        }
+
+        if (!s.contains("KerekereContextProfile.scoreCandidate(program, c, finalText)")) {
+            String scoreAnchor = '''            for (String hint : hints) {
+                String h = hint == null ? "" : hint.trim();
+                if (h.length() < 2 || h.length() > 30) continue;
+                if (c.contains(h)) score += Math.min(4.5, 0.9 + h.length() * 0.24);
+            }
+            score += Math.min(c.length(), 140) * 0.002;
+'''
+            String scoreReplacement = '''            for (String hint : hints) {
+                String h = hint == null ? "" : hint.trim();
+                if (h.length() < 2 || h.length() > 30) continue;
+                if (c.contains(h)) score += Math.min(4.5, 0.9 + h.length() * 0.24);
+            }
+            score += KerekereContextProfile.scoreCandidate(program, c, finalText);
+            score += Math.min(c.length(), 140) * 0.002;
+'''
+            if (!s.contains(scoreAnchor)) throw new GradleException("v0.18 patch: candidate score anchor missing")
+            s = s.replace(scoreAnchor, scoreReplacement)
+        }
+
+        if (!s.contains("ContextCorrectionEngine.refine(program, finalText, lexical)")) {
+            s = s.replace(
+                    "        String corrected = store.applyCorrections(program, selected.trim()).trim();",
+                    "        String lexical = store.applyCorrections(program, selected.trim()).trim();\n" +
+                    "        String corrected = ContextCorrectionEngine.refine(program, finalText, lexical).trim();\n" +
+                    "        if (!corrected.equals(lexical)) {\n" +
+                    "            diag(\"context_correction\", \"profile=\" + KerekereContextProfile.PROFILE_VERSION\n" +
+                    "                    + \";from=\" + ContextCorrectionEngine.brief(lexical)\n" +
+                    "                    + \";to=\" + ContextCorrectionEngine.brief(corrected));\n" +
+                    "        }")
+        }
+
+        // Preserve the source of a committed recognition block. SpeechRecognizer segment/final
+        // callbacks represent real utterance boundaries, while watchdog recovery is an artificial
+        // boundary and must not create a random newline.
+        s = s.replace("        commitText(rawCandidate, selected);", "        commitText(rawCandidate, selected, source);")
+        s = s.replace("        if (p.length() >= 2) commitText(p, p);", "        if (p.length() >= 2) commitText(p, p, \"recovery\");")
+        s = s.replace("    private void commitText(String rawSegment, String selected) {",
+                "    private void commitText(String rawSegment, String selected, String source) {")
+        s = s.replace("        appendReadable(append, topicBreak, sentenceFromSilence);",
+                "        appendReadable(append, topicBreak, sentenceFromSilence, !\"recovery\".equals(source));")
+        s = s.replace(
+                "                + \";paragraphBreakFromSilence=\" + paragraphFromSilence);",
+                "                + \";paragraphBreakFromSilence=\" + paragraphFromSilence\n                        + \";source=\" + source);")
+
+        String topicMethod = '''    private boolean shouldTopicBreak(String text) {
+        String s = text.replaceAll("^[「『（(\\s]+", "");
+        // Blank paragraphs are reserved for a real section/topic change. Ordinary discourse words
+        // such as "ちなみに" should be a new utterance line, not a new paragraph every time.
+        String[] markers = {
+                "ラジオネーム", "続いて", "続きまして", "次のお便り", "続いてのお便り",
+                "それではこちらのコーナー", "こちらのコーナー", "ここからは", "ここで一曲",
+                "ここで1曲", "聞いていただいたのは", "お知らせ", "エンディングです",
+                "ということで最後まで", "以上 しおりん", "以上しおりん"
+        };
+        for (String m : markers) if (s.startsWith(m)) return true;
+        if (formatProfile != null && formatProfile.markers != null) {
+            for (String m : formatProfile.markers) {
+                if (!m.isEmpty() && s.startsWith(m)
+                        && !"ちなみに".equals(m) && !"ところで".equals(m)) return true;
+            }
+        }
+        int charLimit = formatProfile == null ? 260 : Math.max(220, formatProfile.paragraphChars);
+        int lineLimit = formatProfile == null ? 7 : Math.max(6, formatProfile.linesPerParagraph);
+        return currentParagraphLength() >= charLimit || currentParagraphSentenceCount() >= lineLimit;
+    }
+
+'''
+        s = replaceRange(s,
+                "    private boolean shouldTopicBreak(String text) {",
+                "    private void appendRaw(String segment) {",
+                topicMethod,
+                "utterance topic breaks")
+
+        String readableMethod = '''    private void appendReadable(String text, boolean topicBreak,
+                                boolean sentenceFromSilence, boolean utteranceBoundary) {
+        text = formatRecognizedSegment(text);
+        if (text.isEmpty()) return;
+
+        // A clear acoustic pause can close the previous utterance even when Google's text omitted
+        // punctuation. Do not do this at artificial recognizer rollovers.
+        if (sentenceFromSilence && !finalText.isEmpty()
+                && !endsWithSentencePunctuation(finalText)
+                && !finalText.endsWith("\\n")) {
+            finalText += "。";
+        }
+
+        String[] pieces = text.split("(?<=[。！？!?])");
+        boolean firstPiece = true;
+        int charLimit = formatProfile == null ? 260 : Math.max(220, formatProfile.paragraphChars);
+        int lineLimit = formatProfile == null ? 7 : Math.max(6, formatProfile.linesPerParagraph);
+        for (String piece : pieces) {
+            piece = piece.trim();
+            if (piece.isEmpty()) continue;
+
+            // A finalized/segmented ASR block is a spoken-unit boundary. Add terminal punctuation
+            // only for a substantial completed-looking unit; short fillers stay natural.
+            if (utteranceBoundary && !endsWithSentencePunctuation(piece)
+                    && piece.length() >= 9 && !looksLikeOpenEndedFragment(piece)) {
+                piece += "。";
+            }
+
+            boolean newParagraph = !finalText.isEmpty()
+                    && ((firstPiece && topicBreak)
+                    || currentParagraphLength() >= charLimit
+                    || currentParagraphSentenceCount() >= lineLimit);
+
+            if (!finalText.isEmpty()) {
+                if (newParagraph) {
+                    if (!finalText.endsWith("\\n\\n")) {
+                        if (finalText.endsWith("\\n")) finalText += "\\n";
+                        else finalText += "\\n\\n";
+                    }
+                } else if (!firstPiece || utteranceBoundary || sentenceFromSilence) {
+                    if (!finalText.endsWith("\\n")) finalText += "\\n";
+                } else if (!finalText.endsWith(" ") && !finalText.endsWith("\\n")) {
+                    // Watchdog/session recovery is not a speech boundary. Reconnect the text with a
+                    // space instead of manufacturing a newline in the middle of one utterance.
+                    finalText += " ";
+                }
+            }
+            finalText += piece;
+            firstPiece = false;
+        }
+    }
+
+    private boolean looksLikeOpenEndedFragment(String s) {
+        String x = s == null ? "" : s.trim();
+        String[] endings = {"けど", "けれど", "けれども", "ので", "から", "て", "で", "し",
+                "とか", "って", "という", "あの", "その", "この", "なんか", "えっと", "まあ"};
+        for (String e : endings) if (x.endsWith(e)) return true;
+        return false;
+    }
+
+'''
+        s = replaceRange(s,
+                "    private void appendReadable(String text, boolean topicBreak, boolean sentenceFromSilence) {",
+                "    private String formatRecognizedSegment(String text) {",
+                readableMethod,
+                "utterance readable formatting")
+
+        // Chunked writes reduce repeat risk when a recognizer pipe closes during restart.
+        String oldWriteBlock = '''                    boolean sent = false;
+                    while (running && !sent && !drainComplete) {
+                        OutputStream target;
+                        synchronized (pipeLock) { target = pipeOut; }
+                        if (target == null) {
+                            sleepQuietly(35L);
+                            continue;
+                        }
+                        try {
+                            target.write(encoded);
+                            sent = true;
+                        } catch (IOException e) {
+                            diag("feeder_pipe_retry", "generation=" + recognizerGeneration
+                                    + ";pos=" + pos + ";error=" + e.getClass().getSimpleName());
+                            sleepQuietly(100L);
+                        }
+                    }
+                    if (!sent) continue;
+'''
+        String newWriteBlock = '''                    boolean sent = writeRecognizerBytes(encoded);
+                    if (!sent) continue;
+'''
+        if (s.contains(oldWriteBlock)) s = s.replace(oldWriteBlock, newWriteBlock)
+
+        s = s.replace(
+                "                        if (sourceFinished) {\n                            markDrainComplete();\n                            break;\n                        }",
+                "                        if (sourceFinished) {\n                            finishHighSpeedProcessorToPipe();\n                            markDrainComplete();\n                            break;\n                        }")
+        s = s.replace(
+                "        if (spoolBytesConsumed >= spoolBytesWritten) markDrainComplete();",
+                "        if (spoolBytesConsumed >= spoolBytesWritten) {\n            finishHighSpeedProcessorToPipe();\n            markDrainComplete();\n        }")
+
+        String replacementMethods = '''    private boolean writeRecognizerBytes(byte[] data) {
+        if (data == null || data.length == 0) return true;
+        int offset = 0;
+        while (running && offset < data.length && !drainComplete) {
+            OutputStream target;
+            synchronized (pipeLock) { target = pipeOut; }
+            if (target == null) {
+                sleepQuietly(35L);
+                continue;
+            }
+            int len = Math.min(4096, data.length - offset);
+            try {
+                target.write(data, offset, len);
+                offset += len;
+            } catch (IOException e) {
+                diag("feeder_pipe_retry", "generation=" + recognizerGeneration
+                        + ";offset=" + offset + ";error=" + e.getClass().getSimpleName());
+                sleepQuietly(110L);
+            }
+        }
+        return offset >= data.length;
+    }
+
+    private void finishHighSpeedProcessorToPipe() {
+        HighSpeedSonicProcessor p = highSpeedProcessor;
+        if (p == null) return;
+        try {
+            byte[] tail = p.finish();
+            if (tail.length > 0) writeRecognizerBytes(tail);
+            diag("high_speed_processor_finish", "tailBytes=" + tail.length);
+        } catch (Exception e) {
+            diag("high_speed_processor_finish_error", e.getClass().getSimpleName() + ":" + e.getMessage());
+        } finally {
+            try { p.reset(); } catch (Exception ignored) {}
+            highSpeedProcessor = null;
+        }
+    }
+
+    private byte[] encodeForRecognizer(short[] input, int n, float factor) {
+        if (factor < 1.4f || highSpeedProcessor == null) return pcmBytes(input, n);
+        try {
+            return highSpeedProcessor.process(input, n);
+        } catch (Exception e) {
+            diag("high_speed_processor_error", e.getClass().getSimpleName() + ":" + e.getMessage());
+            return pcmBytes(input, n);
+        }
+    }
+
+'''
+        s = replaceRange(s,
+                "    private byte[] encodeForRecognizer(short[] input, int n, float factor) {",
+                "    private void sleepQuietly(long ms) {",
+                replacementMethods,
+                "TranscribeService high-speed methods")
+
+        if (!s.contains("highSpeedProcessor = null;\n        store.autoBackup")) {
+            s = s.replace(
+                    "        store.autoBackup(this);",
+                    "        if (highSpeedProcessor != null) {\n" +
+                    "            try { highSpeedProcessor.reset(); } catch (Exception ignored) {}\n" +
+                    "            highSpeedProcessor = null;\n" +
+                    "        }\n" +
+                    "        store.autoBackup(this);")
+        }
+        serviceFile.write(s, "UTF-8")
+
+        File episodeFile = file("src/main/java/com/example/radikotranscriber/EpisodeStore.java")
+        String e = episodeFile.getText("UTF-8")
+
+        String safeApply = '''    public String applyCorrections(String program, String text) {
+        return CorrectionSanitizer.applySinglePass(getCorrections(program), text);
+    }
+
+'''
+        e = replaceRange(e,
+                "    public String applyCorrections(String program, String text) {",
+                "    public ArrayList<String> getBiasStrings(String program, String title) {",
+                safeApply,
+                "EpisodeStore single-pass corrections")
+
+        String biasMethod = '''    public ArrayList<String> getBiasStrings(String program, String title) {
+        LinkedHashSet<String> set = new LinkedHashSet<>();
+        for (String term : KerekereContextProfile.biasTerms(program)) {
+            if (set.size() >= 50) break;
+            set.add(term);
+        }
+        if (set.size() < 50) addUsefulBias(set, safe(program));
+        if (set.size() < 50) addUsefulBias(set, safe(title));
+        for (Correction r : getCorrections(program)) {
+            String corrected = normalizeLexical(r.correct);
+            if (corrected.length() >= 2) set.add(corrected);
+            if (set.size() >= 50) break;
+        }
+        ArrayList<String> out = new ArrayList<>(set);
+        return out.size() <= 50 ? out : new ArrayList<>(out.subList(0, 50));
+    }
+
+'''
+        e = replaceRange(e,
+                "    public ArrayList<String> getBiasStrings(String program, String title) {",
+                "    private void addUsefulBias(LinkedHashSet<String> set, String s) {",
+                biasMethod,
+                "EpisodeStore program-first bias strings")
+
+        e = e.replace(
+                "            if (wrong.length() < 2 || wrong.length() > 40 || correct.isEmpty() || correct.length() > 40) continue;",
+                "            if (!CorrectionSanitizer.isSafeLearnedPair(e.program, wrong, correct)) continue;")
+        episodeFile.write(e, "UTF-8")
+
+        File mainFile = file("src/main/java/com/example/radikotranscriber/MainActivity.java")
+        String m = mainFile.getText("UTF-8")
+
+        if (!m.contains("metadataRequestSerial")) {
+            m = m.replace(
+                    "    private long lastUiDiagnosticAt = 0L;\n",
+                    "    private long lastUiDiagnosticAt = 0L;\n" +
+                    "    private int metadataRequestSerial = 0;\n" +
+                    "    private String lastAutoEpisodeText = \"\";\n")
+        }
+
+        m = m.replace(
+                "        setupTranscriptEditor();\n        inAppPlaybackCheck.setChecked",
+                "        setupTranscriptEditor();\n        setupUrlMetadata();\n        inAppPlaybackCheck.setChecked")
+
+        if (!m.contains("R.id.metadataButton")) {
+            m = m.replace(
+                    "        findViewById(R.id.openBrowserButton).setOnClickListener(v -> openInBrowser());",
+                    "        findViewById(R.id.openBrowserButton).setOnClickListener(v -> openInBrowser());\n" +
+                    "        findViewById(R.id.metadataButton).setOnClickListener(v -> fetchRadikoMetadata(true));")
+        }
+
+        String metadataMethods = '''    private void setupUrlMetadata() {
+        urlInput.addTextChangedListener(new TextWatcher() {
+            @Override public void beforeTextChanged(CharSequence s, int start, int count, int after) {}
+            @Override public void onTextChanged(CharSequence s, int start, int before, int count) {}
+            @Override public void afterTextChanged(Editable editable) {
+                if (serviceRunning) return;
+                final String u = editable == null ? "" : editable.toString().trim();
+                final int serial = ++metadataRequestSerial;
+                if (!RadikoMetadataFetcher.looksLikeRadikoEpisode(u)) return;
+                // Debounce paste/typing. The serial check makes older queued lookups harmless.
+                new Handler(Looper.getMainLooper()).postDelayed(() -> {
+                    if (serial != metadataRequestSerial) return;
+                    if (!u.equals(urlInput.getText().toString().trim())) return;
+                    fetchRadikoMetadata(false);
+                }, 650L);
+            }
+        });
+    }
+
+    private void fetchRadikoMetadata(boolean manual) {
+        final String u = urlInput.getText().toString().trim();
+        if (!RadikoMetadataFetcher.looksLikeRadikoEpisode(u)) {
+            if (manual) status.setText("radiko PodcastのURLを入力してください。");
+            return;
+        }
+        final int serial = ++metadataRequestSerial;
+        final String beforeEpisode = episodeInput.getText().toString().trim();
+        if (manual || beforeEpisode.isEmpty()) status.setText("radikoから放送回・タイトル・放送日を取得しています…");
+
+        RadikoMetadataFetcher.fetchAsync(u, result -> {
+            if (serial != metadataRequestSerial) return;
+            if (!u.equals(urlInput.getText().toString().trim())) return;
+
+            if (!result.program.isEmpty() && programInput.getText().toString().trim().isEmpty()) {
+                programInput.setText(result.program);
+            }
+
+            String display = result.displayEpisode();
+            String current = episodeInput.getText().toString().trim();
+            boolean safeToFill = current.equals(beforeEpisode)
+                    && (beforeEpisode.isEmpty() || "名称未入力の回".equals(beforeEpisode)
+                    || beforeEpisode.equals(lastAutoEpisodeText));
+            if (!display.isEmpty() && safeToFill) {
+                episodeInput.setText(display);
+                lastAutoEpisodeText = display;
+            }
+
+            if (result.hasEpisodeIdentity()) {
+                StringBuilder b = new StringBuilder("自動取得：");
+                if (!result.episodeNumber.isEmpty()) b.append(result.episodeNumber);
+                if (!result.episodeTitle.isEmpty()) b.append("「").append(result.episodeTitle).append("」");
+                if (!result.broadcastDate.isEmpty()) b.append("  ").append(result.broadcastDate).append("放送分");
+                status.setText(b.toString());
+                diagnostics.log(activeEpisodeId, "radiko_metadata",
+                        "number=" + result.episodeNumber + ";title=" + result.episodeTitle
+                                + ";date=" + result.broadcastDate + ";program=" + result.program);
+
+                // A very fast Start tap can create the episode before the network lookup returns.
+                // If it is still the same URL and the current title is auto-fillable, update storage.
+                if (activeEpisodeId > 0) {
+                    EpisodeStore.Episode ep = store.getEpisode(activeEpisodeId);
+                    if (ep != null && sameEpisodeUrl(ep.url, u)
+                            && !episodeInput.getText().toString().trim().isEmpty()) {
+                        store.updateMeta(activeEpisodeId,
+                                programInput.getText().toString().trim(),
+                                episodeInput.getText().toString().trim(), u);
+                    }
+                }
+                updateCurrentLabel();
+            } else if (manual) {
+                status.setText("自動取得できませんでした。URLはそのまま使えるので、回名だけ手入力できます。");
+                diagnostics.log(activeEpisodeId, "radiko_metadata_failed", "reason=" + result.error);
+            }
+        });
+    }
+
+'''
+        if (!m.contains("private void setupUrlMetadata()")) {
+            m = m.replace("    private void requestStart(int mode) {", metadataMethods + "    private void requestStart(int mode) {")
+        }
+
+        // External browser is the only playback route. The old WebView code remains in source only
+        // for rollback/debug history, but this build never selects it.
+        String oldPlaybackTarget = '''    private void openPlaybackTarget() {
+        if (inAppPlaybackCheck != null && inAppPlaybackCheck.isChecked()) openInAppBrowser();
+        else openInBrowser();
+    }
+'''
+        String newPlaybackTarget = '''    private void openPlaybackTarget() {
+        openInBrowser();
+    }
+'''
+        if (m.contains(oldPlaybackTarget)) m = m.replace(oldPlaybackTarget, newPlaybackTarget)
+
+        m = m.replace("文字起こしを開始しています… 再生画面を開きます。",
+                "文字起こしを開始しています… 外部ブラウザでradikoを開きます。")
+        m = m.replace("新しい回を準備中。URLを貼って開始してください。",
+                "新しい回を準備中。radiko URLを貼ると放送回・タイトル・放送日を自動取得します。")
+        m = m.replace(
+                "        try { unregisterReceiver(receiver); } catch (Exception ignored) {}\n        super.onDestroy();",
+                "        try { unregisterReceiver(receiver); } catch (Exception ignored) {}\n" +
+                "        metadataRequestSerial++;\n        super.onDestroy();")
+        mainFile.write(m, "UTF-8")
+
+        File layout = file("src/main/res/layout/activity_main.xml")
+        String x = layout.getText("UTF-8")
+        x = x.replace("v0.15", "v0.18").replace("v0.16", "v0.18").replace("v0.17", "v0.18")
+        x = x.replace(
+                "v0.18  •  新規回を自動分離 / 改行学習 / アプリ内Web＋文字起こし",
+                "v0.18  •  外部ブラウザ / URL自動入力 / けれけれ専用文脈 / 一発話改行")
+        x = x.replace(
+                "v0.18  •  けれけれ専用文脈 / 改行学習 / 診断ログ / バッファ認識",
+                "v0.18  •  外部ブラウザ / URL自動入力 / けれけれ専用文脈 / 一発話改行")
+
+        String urlBlock = '''            <EditText
+                android:id="@+id/urlInput"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:hint="radiko Podcast URL"
+                android:inputType="textUri"
+                android:singleLine="true"/>
+'''
+        String urlWithMeta = urlBlock + '''
+            <Button
+                android:id="@+id/metadataButton"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="URLから放送回・タイトル・放送日を取得"/>
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="URLを貼るだけでも自動取得します。取得できない場合だけ手入力してください。"
+                android:textColor="#6B7280"
+                android:textSize="11sp"/>
+'''
+        if (x.contains(urlBlock) && !x.contains("@+id/metadataButton")) x = x.replace(urlBlock, urlWithMeta)
+
+        x = x.replace("android:hint=\"回の名前  例：2026/09/04 第○回\"",
+                "android:hint=\"放送日 #回「タイトル」（URLから自動入力）\"")
+        x = x.replace("android:text=\"文字起こし開始 → 再生画面を開く\"",
+                "android:text=\"文字起こし開始 → 外部ブラウザでradiko再生\"")
+        x = x.replace("android:text=\"外部ブラウザだけ開く\"",
+                "android:text=\"radikoを外部ブラウザで開く\"")
+        x = x.replace(
+                "android:text=\"文ごとに改行し、話題転換や長い無音では空行を入れます。あなたが直した改行・段落の傾向も番組ごとに学習します。\"",
+                "android:text=\"一発話ごとを基本に改行し、コーナー移動・お便り切替・長い無音では空行を入れます。認識器の再接続だけでは改行しません。\"")
+        x = x.replace(
+                "android:text=\"1.5x / 2.0xは音声取得と認識を分離します。再生を取りこぼさず一時バッファへ保存し、認識後に自動削除します。\"",
+                "android:text=\"1.5x / 2.0xは音声を一時保存し、Media3 Sonicで通常速度に近づけてから認識します。再生終了後も残りを処理します。\"")
+
+        // Keep old in-app controls physically present for source compatibility, but hide them. The
+        // playback target itself is also forced to external browser above.
+        if (!x.contains("android:id=\"@+id/inAppPlaybackCheck\"\n                android:visibility=\"gone\"")) {
+            x = x.replace("android:id=\"@+id/inAppPlaybackCheck\"",
+                    "android:id=\"@+id/inAppPlaybackCheck\"\n                android:visibility=\"gone\"")
+        }
+        if (!x.contains("android:id=\"@+id/openInAppButton\"\n                android:visibility=\"gone\"")) {
+            x = x.replace("android:id=\"@+id/openInAppButton\"",
+                    "android:id=\"@+id/openInAppButton\"\n                android:visibility=\"gone\"")
+        }
+        layout.write(x, "UTF-8")
+
+        File manifest = file("src/main/AndroidManifest.xml")
+        String mf = manifest.getText("UTF-8")
+        mf = mf.replace("        <activity android:name=\".InAppBrowserActivity\" android:exported=\"false\"/>\n", "")
+        manifest.write(mf, "UTF-8")
+    }
+}
