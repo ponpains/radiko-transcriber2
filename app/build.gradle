@@ -10,8 +10,8 @@ android {
         applicationId "com.ponpains.radikotranscriber"
         minSdk 33
         targetSdk 35
-        versionCode 17
-        versionName "0.17"
+        versionCode 18
+        versionName "0.18"
     }
 
     compileOptions {
@@ -42,4 +42,4 @@ dependencies {
     implementation 'androidx.media3:media3-common:1.8.1'
 }
 
-apply from: 'v017-source-patch.gradle'
+apply from: 'v018-source-patch.gradle'
