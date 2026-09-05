@@ -6,6 +6,7 @@ import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.SharedPreferences;
 import android.graphics.Color;
+import android.graphics.Typeface;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
@@ -64,8 +65,9 @@ public class InAppBrowserActivity extends AppCompatActivity {
                 boolean nearBottom = isNearBottom();
                 transcriptView.setText(text);
                 if (nearBottom) transcriptView.post(() -> {
-                    View parent = (View)transcriptView.getParent();
-                    if (parent instanceof ScrollView) ((ScrollView)parent).fullScroll(View.FOCUS_DOWN);
+                    if (transcriptView.getParent() instanceof ScrollView) {
+                        ((ScrollView)transcriptView.getParent()).fullScroll(View.FOCUS_DOWN);
+                    }
                 });
             }
         }
@@ -166,7 +168,7 @@ public class InAppBrowserActivity extends AppCompatActivity {
 
         TextView heading = new TextView(this);
         heading.setText("現在の文字起こし");
-        heading.setTextStyle(android.graphics.Typeface.BOLD);
+        heading.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
         heading.setTextSize(15);
         heading.setTextColor(Color.rgb(17, 24, 39));
         heading.setPadding(dp(12), dp(8), dp(12), dp(4));
@@ -182,7 +184,8 @@ public class InAppBrowserActivity extends AppCompatActivity {
         transcriptView.setPadding(dp(12), dp(10), dp(12), dp(18));
         transcriptView.setLineSpacing(0, 1.12f);
         transcriptView.setText("まだ文字起こしはありません。");
-        transcriptScroll.addView(transcriptView, new ScrollView.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        transcriptScroll.addView(transcriptView, new ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         root.addView(transcriptScroll, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
 
         TextView note = new TextView(this);
@@ -218,15 +221,13 @@ public class InAppBrowserActivity extends AppCompatActivity {
             }
         });
         webView.setOnTouchListener((v, e) -> {
-            ViewParentCompat.disallow(v, e.getActionMasked() == MotionEvent.ACTION_DOWN || e.getActionMasked() == MotionEvent.ACTION_MOVE);
+            if (v.getParent() != null) {
+                boolean moving = e.getActionMasked() == MotionEvent.ACTION_DOWN
+                        || e.getActionMasked() == MotionEvent.ACTION_MOVE;
+                v.getParent().requestDisallowInterceptTouchEvent(moving);
+            }
             return false;
         });
-    }
-
-    private static class ViewParentCompat {
-        static void disallow(View v, boolean value) {
-            if (v.getParent() != null) v.getParent().requestDisallowInterceptTouchEvent(value);
-        }
     }
 
     private LinearLayout.LayoutParams webParams(boolean expanded) {
@@ -236,7 +237,6 @@ public class InAppBrowserActivity extends AppCompatActivity {
 
     private void setWebExpanded(boolean expanded) {
         webHolder.setLayoutParams(webParams(expanded));
-        // Keep the WebView attached and alive even when visually collapsed.
         webView.setVisibility(View.VISIBLE);
     }
 
