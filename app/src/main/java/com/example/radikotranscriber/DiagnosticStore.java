@@ -64,7 +64,7 @@ public class DiagnosticStore extends SQLiteOpenHelper {
     public String exportPack(EpisodeStore store, int maxEpisodes) {
         try {
             JSONObject root = new JSONObject();
-            root.put("format", "radiko-transcriber-diagnostics-v3");
+            root.put("format", "radiko-transcriber-diagnostics-v4");
             root.put("generatedAt", iso(System.currentTimeMillis()));
             root.put("purpose", "assistant-debugging");
             root.put("audioIncluded", false);
@@ -107,6 +107,7 @@ public class DiagnosticStore extends SQLiteOpenHelper {
                 o.put("finalTranscript", e.transcript);
                 o.put("formatLearning", FormatLearningStore.toJson(appContext, e.program));
                 o.put("programContext", KerekereContextProfile.describe(e.program));
+                o.put("contextBoost", KerekereContextBoost.VERSION);
 
                 JSONArray segs = new JSONArray();
                 for (EpisodeStore.Segment s : store.listSegments(e.id)) {
@@ -136,14 +137,14 @@ public class DiagnosticStore extends SQLiteOpenHelper {
             root.put("episodes", episodes);
             return root.toString(2);
         } catch (Exception e) {
-            return "{\"format\":\"radiko-transcriber-diagnostics-v3\",\"error\":\"export_failed\"}";
+            return "{\"format\":\"radiko-transcriber-diagnostics-v4\",\"error\":\"export_failed\"}";
         }
     }
 
     private JSONArray eventsForEpisode(long episodeId) {
         JSONArray out = new JSONArray();
         Cursor c = getReadableDatabase().query("events", null, "episode_id=?",
-                new String[]{String.valueOf(episodeId)}, null, null, "at_ms ASC", "6000");
+                new String[]{String.valueOf(episodeId)}, null, null, "at_ms ASC", "9000");
         try {
             while (c.moveToNext()) {
                 JSONObject o = new JSONObject();
