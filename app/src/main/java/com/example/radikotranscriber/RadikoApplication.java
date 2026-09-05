@@ -17,12 +17,11 @@ public class RadikoApplication extends Application {
 
     @Override public void onCreate() {
         super.onCreate();
-        // This is intentionally synchronous and small. The diagnostic pack showed that unsafe
-        // legacy rules could alter recognition from the first candidate of a session, so cleanup
-        // must finish before MainActivity/TranscribeService can be used.
+        // Synchronous on purpose: unsafe legacy rules must be gone before a recognizer can start.
         int removed = CorrectionSanitizer.sanitize(this);
         new DiagnosticStore(this).log(-1L, "correction_sanitizer",
-                "removed=" + removed + ";singlePass=true;guard=v16");
+                "removed=" + removed + ";singlePass=true;guard=v17;profile="
+                        + KerekereContextProfile.PROFILE_VERSION);
 
         receiver = new BroadcastReceiver() {
             @Override public void onReceive(Context context, Intent intent) {
@@ -39,7 +38,8 @@ public class RadikoApplication extends Application {
                         ContextCorrectionEngine.Result r = ContextCorrectionEngine.refineEpisode(
                                 RadikoApplication.this, store, episodeId);
                         diagnostics.log(episodeId, "context_postprocess",
-                                "changed=" + r.changed() + ";segments=" + r.segmentChanges
+                                "profile=" + KerekereContextProfile.PROFILE_VERSION
+                                        + ";changed=" + r.changed() + ";segments=" + r.segmentChanges
                                         + ";changedChars=" + r.changedChars);
                         if (r.changed()) {
                             Intent update = new Intent(TranscribeService.ACTION_UPDATE);
@@ -47,7 +47,7 @@ public class RadikoApplication extends Application {
                             update.putExtra("postContextCorrected", true);
                             update.putExtra("episodeId", episodeId);
                             update.putExtra("running", false);
-                            update.putExtra("status", "文脈補正を適用して保存しました。");
+                            update.putExtra("status", "けれけれ文脈補正を適用して保存しました。");
                             update.putExtra("text", r.finalText);
                             update.putExtra("mode", "internal");
                             update.putExtra("peak", 0);
