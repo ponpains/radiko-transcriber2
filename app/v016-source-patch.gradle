@@ -1,0 +1,179 @@
+// v0.16 build-time source patch.
+// Kept in one explicit script so the recognition changes are reproducible in GitHub Actions.
+// Each CI checkout starts from clean sources; this task applies the v0.16 engine deltas before
+// Android compilation. The replacements are idempotent for local incremental builds.
+
+def replaceRange = { String text, String startMarker, String endMarker, String replacement, String label ->
+    int a = text.indexOf(startMarker)
+    if (a < 0) throw new GradleException("v0.16 patch: start marker not found: " + label)
+    int b = text.indexOf(endMarker, a)
+    if (b < 0) throw new GradleException("v0.16 patch: end marker not found: " + label)
+    return text.substring(0, a) + replacement + text.substring(b)
+}
+
+tasks.named("preBuild").configure {
+    doFirst {
+        File serviceFile = file("src/main/java/com/example/radikotranscriber/TranscribeService.java")
+        String s = serviceFile.getText("UTF-8")
+
+        if (!s.contains("private HighSpeedSonicProcessor highSpeedProcessor;")) {
+            s = s.replace(
+                    "    private DiagnosticStore diagnostics;\n",
+                    "    private DiagnosticStore diagnostics;\n    private HighSpeedSonicProcessor highSpeedProcessor;\n")
+        }
+
+        // The v0.15 diagnostic pack showed the provider disconnecting at nearly every ~65 s
+        // rollover. Retire the session earlier and give the provider a real cooldown. PCM remains
+        // safe in the spool while recognition is disconnected.
+        s = s.replace("            long rollover = 65000L;", "            long rollover = 58000L;")
+        s = s.replace(
+                "                requestRecognizerRestart(\"認識器を安全に更新しています…\", 850L);",
+                "                requestRecognizerRestart(\"認識器を安全に更新しています…\", 2200L);")
+        s = s.replace(
+                "                        else if (error == SpeechRecognizer.ERROR_SERVER_DISCONNECTED\n                                || error == SpeechRecognizer.ERROR_SERVER) delay = 1000L;",
+                "                        else if (error == SpeechRecognizer.ERROR_SERVER_DISCONNECTED\n                                || error == SpeechRecognizer.ERROR_SERVER) delay = 2000L;")
+
+        if (!s.contains("engine=Media3Sonic")) {
+            s = s.replace(
+                    "        prepareSpool();\n        acquireWakeLock();",
+                    "        prepareSpool();\n        highSpeedProcessor = isHighSpeed() ? new HighSpeedSonicProcessor(playbackSpeed) : null;\n        if (highSpeedProcessor != null) diag(\"high_speed_processor\", \"engine=Media3Sonic;factor=\" + playbackSpeed);\n        acquireWakeLock();")
+        }
+
+        // Apply only conservative, context-gated corrections after the sanitized lexical rules.
+        if (!s.contains("ContextCorrectionEngine.refine(program, finalText, lexical)")) {
+            s = s.replace(
+                    "        String corrected = store.applyCorrections(program, selected.trim()).trim();",
+                    "        String lexical = store.applyCorrections(program, selected.trim()).trim();\n" +
+                    "        String corrected = ContextCorrectionEngine.refine(program, finalText, lexical).trim();\n" +
+                    "        if (!corrected.equals(lexical)) {\n" +
+                    "            diag(\"context_correction\", \"from=\" + ContextCorrectionEngine.brief(lexical)\n" +
+                    "                    + \";to=\" + ContextCorrectionEngine.brief(corrected));\n" +
+                    "        }")
+        }
+
+        // Chunked writes reduce the amount that can be repeated if a recognizer pipe closes during
+        // a restart. Media3 Sonic is stateful across all input chunks, unlike the old per-chunk OLA.
+        String oldWriteBlock = '''                    boolean sent = false;
+                    while (running && !sent && !drainComplete) {
+                        OutputStream target;
+                        synchronized (pipeLock) { target = pipeOut; }
+                        if (target == null) {
+                            sleepQuietly(35L);
+                            continue;
+                        }
+                        try {
+                            target.write(encoded);
+                            sent = true;
+                        } catch (IOException e) {
+                            diag("feeder_pipe_retry", "generation=" + recognizerGeneration
+                                    + ";pos=" + pos + ";error=" + e.getClass().getSimpleName());
+                            sleepQuietly(100L);
+                        }
+                    }
+                    if (!sent) continue;
+'''
+        String newWriteBlock = '''                    boolean sent = writeRecognizerBytes(encoded);
+                    if (!sent) continue;
+'''
+        if (s.contains(oldWriteBlock)) s = s.replace(oldWriteBlock, newWriteBlock)
+
+        s = s.replace(
+                "                        if (sourceFinished) {\n                            markDrainComplete();\n                            break;\n                        }",
+                "                        if (sourceFinished) {\n                            finishHighSpeedProcessorToPipe();\n                            markDrainComplete();\n                            break;\n                        }")
+        s = s.replace(
+                "        if (spoolBytesConsumed >= spoolBytesWritten) markDrainComplete();",
+                "        if (spoolBytesConsumed >= spoolBytesWritten) {\n            finishHighSpeedProcessorToPipe();\n            markDrainComplete();\n        }")
+
+        String replacementMethods = '''    private boolean writeRecognizerBytes(byte[] data) {
+        if (data == null || data.length == 0) return true;
+        int offset = 0;
+        while (running && offset < data.length && !drainComplete) {
+            OutputStream target;
+            synchronized (pipeLock) { target = pipeOut; }
+            if (target == null) {
+                sleepQuietly(35L);
+                continue;
+            }
+            int len = Math.min(4096, data.length - offset);
+            try {
+                target.write(data, offset, len);
+                offset += len;
+            } catch (IOException e) {
+                diag("feeder_pipe_retry", "generation=" + recognizerGeneration
+                        + ";offset=" + offset + ";error=" + e.getClass().getSimpleName());
+                sleepQuietly(110L);
+            }
+        }
+        return offset >= data.length;
+    }
+
+    private void finishHighSpeedProcessorToPipe() {
+        HighSpeedSonicProcessor p = highSpeedProcessor;
+        if (p == null) return;
+        try {
+            byte[] tail = p.finish();
+            if (tail.length > 0) writeRecognizerBytes(tail);
+            diag("high_speed_processor_finish", "tailBytes=" + tail.length);
+        } catch (Exception e) {
+            diag("high_speed_processor_finish_error", e.getClass().getSimpleName() + ":" + e.getMessage());
+        } finally {
+            try { p.reset(); } catch (Exception ignored) {}
+            highSpeedProcessor = null;
+        }
+    }
+
+    private byte[] encodeForRecognizer(short[] input, int n, float factor) {
+        if (factor < 1.4f || highSpeedProcessor == null) return pcmBytes(input, n);
+        try {
+            return highSpeedProcessor.process(input, n);
+        } catch (Exception e) {
+            diag("high_speed_processor_error", e.getClass().getSimpleName() + ":" + e.getMessage());
+            return pcmBytes(input, n);
+        }
+    }
+
+'''
+        s = replaceRange(s,
+                "    private byte[] encodeForRecognizer(short[] input, int n, float factor) {",
+                "    private void sleepQuietly(long ms) {",
+                replacementMethods,
+                "TranscribeService high-speed methods")
+
+        if (!s.contains("highSpeedProcessor = null;\n        store.autoBackup")) {
+            s = s.replace(
+                    "        store.autoBackup(this);",
+                    "        if (highSpeedProcessor != null) {\n" +
+                    "            try { highSpeedProcessor.reset(); } catch (Exception ignored) {}\n" +
+                    "            highSpeedProcessor = null;\n" +
+                    "        }\n" +
+                    "        store.autoBackup(this);")
+        }
+        serviceFile.write(s, "UTF-8")
+
+        File episodeFile = file("src/main/java/com/example/radikotranscriber/EpisodeStore.java")
+        String e = episodeFile.getText("UTF-8")
+        String safeApply = '''    public String applyCorrections(String program, String text) {
+        return CorrectionSanitizer.applySinglePass(getCorrections(program), text);
+    }
+
+'''
+        e = replaceRange(e,
+                "    public String applyCorrections(String program, String text) {",
+                "    public ArrayList<String> getBiasStrings(String program, String title) {",
+                safeApply,
+                "EpisodeStore single-pass corrections")
+        e = e.replace(
+                "            if (wrong.length() < 2 || wrong.length() > 40 || correct.isEmpty() || correct.length() > 40) continue;",
+                "            if (!CorrectionSanitizer.isSafeLearnedPair(wrong, correct)) continue;")
+        episodeFile.write(e, "UTF-8")
+
+        File layout = file("src/main/res/layout/activity_main.xml")
+        String x = layout.getText("UTF-8")
+        x = x.replace("v0.15", "v0.16")
+        x = x.replace("実験：radiko＋文字起こし画面を開く", "実験：アプリ内で文字起こし開始")
+        x = x.replace(
+                "1.5x / 2.0xは音声取得と認識を分離します。再生を取りこぼさず一時バッファへ保存し、認識後に自動削除します。",
+                "1.5x / 2.0xは音声を一時保存し、Media3 Sonicで通常速度に近づけてから認識します。再生終了後も残りを処理します。")
+        layout.write(x, "UTF-8")
+    }
+}
