@@ -1,0 +1,185 @@
+package com.example.radikotranscriber;
+
+import android.content.ContentValues;
+import android.content.Context;
+import android.database.sqlite.SQLiteDatabase;
+
+import java.util.ArrayList;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
+/**
+ * Conservative local post-correction. This is intentionally NOT a generative model: it only
+ * changes high-confidence program terms and a few context-gated homophones. Unknown words are
+ * left untouched rather than guessed. Raw/auto transcripts remain available for audit.
+ */
+public final class ContextCorrectionEngine {
+    private ContextCorrectionEngine() {}
+
+    public static String refine(String program, String previousText, String segment) {
+        String s = safe(segment);
+        if (s.isEmpty()) return s;
+        String p = safe(program);
+
+        if (p.contains("けれけれ")) {
+            // Canonical host/show terms that repeatedly appeared as stable ASR confusions.
+            s = s.replace("中田詩織", "永田詩央里")
+                    .replace("中田詩央里", "永田詩央里")
+                    .replace("永田詩織", "永田詩央里")
+                    .replace("長田詩織", "永田詩央里")
+                    .replace("長田しおり", "永田詩央里");
+
+            if (showContext(s, previousText)) {
+                s = s.replace("キレキレ", "けれけれ")
+                        .replace("キレレ", "けれけれ")
+                        .replace("テレテレ", "けれけれ")
+                        .replace("キレキャラ", "けれけれ");
+            }
+
+            if (containsAny(s, "ノットイコール", "永田詩央里", "けれけれ", "アイドルグループ")) {
+                s = s.replace("乗ってくるみ", "ノットイコールミー")
+                        .replace("乗っていく俺に", "ノットイコールミー")
+                        .replace("持っていく俺に", "ノットイコールミー")
+                        .replace("ノットイコールミー", "ノットイコールミー");
+            }
+            if (s.contains("ハッシュタグ")) s = s.replace("長田ラジオ", "永田ラジオ");
+
+            // Context-gated homophones. These only fire when the surrounding subject makes the
+            // intended word very strong, avoiding global replacements such as 公園->公演.
+            if (containsAny(s, "ツアー", "ライブ", "ステージ", "チケット", "体育館")) {
+                s = s.replace("昼公園", "昼公演").replace("夜公園", "夜公演");
+                s = replaceBounded(s, "公園", "公演", new String[]{"ツアー","ライブ","チケット","ステージ","ファイナル"});
+            }
+            if (containsAny(s, "ピーマン", "野菜", "苗", "収穫")) {
+                s = s.replace("初就活", "初収穫").replace("初 就活", "初収穫");
+            }
+            if (s.contains("ペット")) s = s.replace("ペットを買ったことがない", "ペットを飼ったことがない");
+        }
+
+        s = cleanupSpacing(s);
+        return s;
+    }
+
+    /** Applies the same conservative rules to a finished transcript and removes exact long repeats. */
+    public static String refineTranscript(String program, String text) {
+        String src = safe(text).replace("\r\n", "\n").replace('\r','\n');
+        String[] paragraphs = src.split("\\n\\n", -1);
+        StringBuilder out = new StringBuilder(src.length());
+        String previous = "";
+        for (String paragraph : paragraphs) {
+            StringBuilder pOut = new StringBuilder();
+            for (String line : paragraph.split("\\n", -1)) {
+                String refined = refine(program, previous, line);
+                if (refined.trim().isEmpty()) continue;
+                if (isDuplicateTail(previous, refined)) continue;
+                if (pOut.length() > 0) pOut.append('\n');
+                pOut.append(refined);
+                previous = appendTail(previous, refined);
+            }
+            if (pOut.length() > 0) {
+                if (out.length() > 0) out.append("\n\n");
+                out.append(pOut);
+            }
+        }
+        return out.toString().trim();
+    }
+
+    /**
+     * Updates only the user-facing final transcript and segment text. raw_transcript and
+     * auto_transcript are deliberately untouched, so correction can always be audited/reverted.
+     */
+    public static Result refineEpisode(Context context, EpisodeStore store, long episodeId) {
+        Result result = new Result();
+        EpisodeStore.Episode e = store.getEpisode(episodeId);
+        if (e == null) return result;
+
+        String corrected = refineTranscript(e.program, e.transcript);
+        SQLiteDatabase db = store.getWritableDatabase();
+        if (!corrected.equals(e.transcript)) {
+            ContentValues v = new ContentValues();
+            v.put("transcript", corrected);
+            v.put("updated_at", System.currentTimeMillis());
+            db.update("episodes", v, "id=?", new String[]{String.valueOf(episodeId)});
+            result.transcriptChanged = true;
+            result.changedChars = Math.abs(corrected.length() - e.transcript.length());
+        }
+
+        ArrayList<EpisodeStore.Segment> segments = store.listSegments(episodeId);
+        String previous = "";
+        for (EpisodeStore.Segment seg : segments) {
+            String fixed = refine(e.program, previous, seg.text);
+            if (!fixed.equals(seg.text)) {
+                ContentValues sv = new ContentValues();
+                sv.put("text", fixed);
+                db.update("segments", sv, "id=?", new String[]{String.valueOf(seg.id)});
+                result.segmentChanges++;
+            }
+            previous = appendTail(previous, fixed);
+        }
+        result.finalText = corrected;
+        return result;
+    }
+
+    public static class Result {
+        public boolean transcriptChanged;
+        public int segmentChanges;
+        public int changedChars;
+        public String finalText = "";
+        public boolean changed() { return transcriptChanged || segmentChanges > 0; }
+    }
+
+    public static String brief(String s) {
+        String x = safe(s).replace('\n',' ').replace('\r',' ');
+        return x.length() <= 140 ? x : x.substring(0, 140) + "…";
+    }
+
+    private static boolean showContext(String s, String previous) {
+        String c = safe(previous);
+        if (c.length() > 240) c = c.substring(c.length() - 240);
+        c += " " + s;
+        return containsAny(c, "番組", "ラジオ", "永田", "詩央里", "聞いて", "過去回", "第", "パーソナリティ");
+    }
+
+    private static String replaceBounded(String s, String wrong, String correct, String[] hints) {
+        int i = s.indexOf(wrong);
+        while (i >= 0) {
+            int from = Math.max(0, i - 35), to = Math.min(s.length(), i + wrong.length() + 35);
+            String around = s.substring(from, to);
+            if (containsAny(around, hints)) {
+                s = s.substring(0, i) + correct + s.substring(i + wrong.length());
+                i = s.indexOf(wrong, i + correct.length());
+            } else i = s.indexOf(wrong, i + wrong.length());
+        }
+        return s;
+    }
+
+    private static boolean isDuplicateTail(String previous, String line) {
+        String a = compact(previous), b = compact(line);
+        if (b.length() < 14 || a.length() < b.length()) return false;
+        int take = Math.min(b.length(), 120);
+        return a.endsWith(b.substring(0, take)) && (b.length() <= take || a.endsWith(b));
+    }
+
+    private static String appendTail(String previous, String line) {
+        String s = safe(previous) + "\n" + safe(line);
+        return s.length() > 500 ? s.substring(s.length() - 500) : s;
+    }
+
+    private static String cleanupSpacing(String s) {
+        return safe(s)
+                .replaceAll("[ \\t]+([、。！？!?])", "$1")
+                .replaceAll("([（(]) +", "$1")
+                .replaceAll(" +([）)])", "$1")
+                .replaceAll("[ \\t]{2,}", " ")
+                .trim();
+    }
+
+    private static String compact(String s) {
+        return safe(s).replaceAll("[\\s、。！？!?，,.・：；]+", "");
+    }
+    private static boolean containsAny(String s, String... terms) {
+        for (String t : terms) if (s.contains(t)) return true;
+        return false;
+    }
+    private static String safe(String s) { return s == null ? "" : s; }
+}
