@@ -15,10 +15,7 @@ import java.util.ArrayList;
 import java.util.Date;
 import java.util.Locale;
 
-/**
- * Internal diagnostics only. This database is deliberately separate from the user's archive DB,
- * so diagnostics can be changed or removed later without touching transcript data.
- */
+/** Internal diagnostics for assistant debugging. Audio itself is never included. */
 public class DiagnosticStore extends SQLiteOpenHelper {
     private static final String DB_NAME = "radiko_diagnostics.db";
     private static final int DB_VERSION = 1;
@@ -67,7 +64,7 @@ public class DiagnosticStore extends SQLiteOpenHelper {
     public String exportPack(EpisodeStore store, int maxEpisodes) {
         try {
             JSONObject root = new JSONObject();
-            root.put("format", "radiko-transcriber-diagnostics-v2");
+            root.put("format", "radiko-transcriber-diagnostics-v3");
             root.put("generatedAt", iso(System.currentTimeMillis()));
             root.put("purpose", "assistant-debugging");
             root.put("audioIncluded", false);
@@ -109,6 +106,7 @@ public class DiagnosticStore extends SQLiteOpenHelper {
                 o.put("autoTranscript", e.autoTranscript);
                 o.put("finalTranscript", e.transcript);
                 o.put("formatLearning", FormatLearningStore.toJson(appContext, e.program));
+                o.put("programContext", KerekereContextProfile.describe(e.program));
 
                 JSONArray segs = new JSONArray();
                 for (EpisodeStore.Segment s : store.listSegments(e.id)) {
@@ -138,7 +136,7 @@ public class DiagnosticStore extends SQLiteOpenHelper {
             root.put("episodes", episodes);
             return root.toString(2);
         } catch (Exception e) {
-            return "{\"format\":\"radiko-transcriber-diagnostics-v2\",\"error\":\"export_failed\"}";
+            return "{\"format\":\"radiko-transcriber-diagnostics-v3\",\"error\":\"export_failed\"}";
         }
     }
 
