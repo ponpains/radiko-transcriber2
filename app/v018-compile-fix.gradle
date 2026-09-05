@@ -1,0 +1,11 @@
+// Runs after v018-source-patch.gradle's preBuild doFirst block.
+// Groovy string escaping would otherwise emit Java's newer \s string escape instead of regex \\s.
+tasks.named("preBuild").configure {
+    doLast {
+        File serviceFile = file("src/main/java/com/example/radikotranscriber/TranscribeService.java")
+        String s = serviceFile.getText("UTF-8")
+        s = s.replace('text.replaceAll("^[「『（(\\s]+", "")',
+                'text.replaceAll("^[「『（(\\\\s]+", "")')
+        serviceFile.write(s, "UTF-8")
+    }
+}
