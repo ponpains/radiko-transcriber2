@@ -1,0 +1,266 @@
+// Corrected v0.26 integration. The stable v0.21 capture/checkpoint/replay transport is untouched.
+def replaceRange026f = { String text, String startMarker, String endMarker, String replacement, String label ->
+    int a = text.indexOf(startMarker)
+    if (a < 0) throw new GradleException("v0.26 fixed: start marker missing: " + label)
+    int b = text.indexOf(endMarker, a)
+    if (b < 0) throw new GradleException("v0.26 fixed: end marker missing: " + label)
+    text.substring(0, a) + replacement + text.substring(b)
+}
+
+tasks.named("preBuild").configure {
+    doLast {
+        File serviceFile = file("src/main/java/com/example/radikotranscriber/TranscribeService.java")
+        String s = serviceFile.getText("UTF-8")
+
+        if (!s.contains("rerecognitionV026")) {
+            String m = "    private volatile int plannedFlushGeneration = -1;\n"
+            if (!s.contains(m)) throw new GradleException("v0.26 fixed: transport fields missing")
+            s = s.replace(m, m
+                    + "    private final SelectiveRerecognitionEngineV026 rerecognitionV026 = new SelectiveRerecognitionEngineV026();\n"
+                    + "    private KerekereCandidateDecisionEngine.Decision pendingDecisionV026;\n"
+                    + "    private volatile boolean postDrainEnhancementStartedV026 = false;\n")
+        }
+        if (!s.contains("rerecognitionV026.reset();")) {
+            String m = "        plannedFlushGeneration = -1;\n        frozenDurationMs = 0L;"
+            if (!s.contains(m)) throw new GradleException("v0.26 fixed: reset marker missing")
+            s = s.replace(m, "        plannedFlushGeneration = -1;\n"
+                    + "        pendingDecisionV026 = null;\n"
+                    + "        postDrainEnhancementStartedV026 = false;\n"
+                    + "        rerecognitionV026.reset();\n"
+                    + "        frozenDurationMs = 0L;")
+        }
+
+        if (!s.contains("OnlineMusicTitleFallbackV026.beginEpisode")) {
+            String m = '''            OnlineEntityVerifierV4.beginEpisode(this, program,
+                    episodeTitle + " " + episodeHints, "internal".equals(mode),
+                    (kind, detail) -> diag(kind, detail));'''
+            if (!s.contains(m)) throw new GradleException("v0.26 fixed: V4 begin marker missing")
+            s = s.replace(m, m + '''
+            OnlineMusicTitleFallbackV026.beginEpisode(this, program, "internal".equals(mode),
+                    (kind, detail) -> diag(kind, detail));''')
+        }
+
+        String appendBest = '''    private void appendBest(Bundle b, String source) {
+        ArrayList<String> list = b.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION);
+        if (list == null || list.isEmpty()) return;
+        float[] confidence = b.getFloatArray(SpeechRecognizer.CONFIDENCE_SCORES);
+        String rawCandidate = list.get(0) == null ? "" : list.get(0).trim();
+        KerekereCandidateDecisionEngine.Decision decision = KerekereCandidateDecisionEngine.choose(
+                program, finalText, episodeTitle + " " + episodeHints, list, confidence,
+                store.getCorrections(program), store.getBiasStrings(program, episodeTitle + " " + episodeHints));
+        String selected = store.applyCorrections(program, decision.selected).trim();
+        pendingDecisionV026 = decision;
+        diag("candidate_decision_v026", "source=" + source + ";selectedIndex=" + decision.selectedIndex
+                + ";" + decision.detail() + ";selected=" + ContextCorrectionEngine.brief(selected));
+        diag("recognition_candidates", candidateDetail(source, list, confidence, selected));
+        partialText = "";
+        commitText(rawCandidate, selected, source);
+        pendingDecisionV026 = null;
+    }
+
+'''
+        s = replaceRange026f(s, "    private void appendBest(Bundle b, String source) {",
+                "    private String candidateDetail(String source, ArrayList<String> list, float[] confidence, String selected) {",
+                appendBest, "appendBest")
+
+        String chooseMethod = '''    private String chooseBestCandidateWithContext(ArrayList<String> candidates, float[] confidence) {
+        KerekereCandidateDecisionEngine.Decision decision = KerekereCandidateDecisionEngine.choose(
+                program, finalText, episodeTitle + " " + episodeHints, candidates, confidence,
+                store.getCorrections(program), store.getBiasStrings(program, episodeTitle + " " + episodeHints));
+        return store.applyCorrections(program, decision.selected).trim();
+    }
+
+'''
+        s = replaceRange026f(s, "    private String chooseBestCandidateWithContext(ArrayList<String> candidates, float[] confidence) {",
+                "    private void flushPartialForRecovery() {", chooseMethod, "partial candidate choice")
+
+        // v0.23 moved online observation to the corrected chunk. Add title-first rescue there.
+        if (!s.contains("OnlineMusicTitleFallbackV026.observe(program")) {
+            String m = '''        OnlineEntityVerifierV4.observe(program, finalText, corrected,
+                (kind, detail) -> diag(kind, detail));'''
+            if (!s.contains(m)) throw new GradleException("v0.26 fixed: corrected online observe missing")
+            s = s.replace(m, m + '''
+        OnlineMusicTitleFallbackV026.observe(program, corrected,
+                (kind, detail) -> diag(kind, detail));''')
+        }
+
+        String oldSegment = '''        if (currentEpisodeId > 0) {
+            store.addSegment(currentEpisodeId, segmentStart, mediaEnd,
+                    rawMerge.duplicate ? rawSegment : rawMerge.append, append, topicBreak);
+        }'''
+        String newSegment = '''        long segmentIdV026 = -1L;
+        if (currentEpisodeId > 0) {
+            segmentIdV026 = store.addSegment(currentEpisodeId, segmentStart, mediaEnd,
+                    rawMerge.duplicate ? rawSegment : rawMerge.append, append, topicBreak);
+        }
+        if (segmentIdV026 > 0 && pendingDecisionV026 != null) {
+            rerecognitionV026.noteSegment(segmentIdV026, segmentStart, mediaEnd, append, pendingDecisionV026);
+            if (pendingDecisionV026.suspicious) {
+                diag("rerecognition_candidate", "segmentId=" + segmentIdV026
+                        + ";startMs=" + segmentStart + ";endMs=" + mediaEnd
+                        + ";state=" + pendingDecisionV026.state
+                        + ";reason=" + pendingDecisionV026.suspiciousReason
+                        + ";margin=" + String.format(Locale.US, "%.3f", pendingDecisionV026.margin));
+            }
+        }'''
+        if (!s.contains(oldSegment)) throw new GradleException("v0.26 fixed: segment marker missing")
+        s = s.replace(oldSegment, newSegment)
+
+        String finishRunnable = '''    private final Runnable finishAfterDrain = new Runnable() {
+        @Override public void run() {
+            finishScheduled = false;
+            if (!running || !drainComplete) return;
+            if (postDrainEnhancementStartedV026) return;
+            flushPartialForRecovery();
+            postDrainEnhancementStartedV026 = true;
+            recognizerReady = false;
+            closePipe();
+            destroyRecognizerOnly();
+            broadcast("怪しい箇所だけ音声を再確認しています…", true);
+            diag("rerecognition_phase_start", "queued=" + rerecognitionV026.queuedCount()
+                    + ";spoolBytes=" + spoolBytesWritten);
+            rerecognitionV026.run(this, spoolFile, mediaStartMs, playbackSpeed, program,
+                    episodeTitle + " " + episodeHints, store, currentEpisodeId,
+                    (kind, detail) -> diag(kind, detail),
+                    (attempted, applied) -> {
+                        if (!running) return;
+                        if (applied > 0) {
+                            String rebuilt = SelectiveRerecognitionEngineV026.rebuildFromSegments(store, currentEpisodeId, program);
+                            if (!rebuilt.trim().isEmpty()) finalText = rebuilt;
+                        }
+                        diag("rerecognition_phase_end", "attempted=" + attempted + ";applied=" + applied
+                                + ";chars=" + finalText.length());
+                        stopEverything("怪しい箇所の再確認と全文校閲まで完了し、保存しました。",
+                                "complete", "buffer_drain_complete_v026");
+                    });
+        }
+    };
+
+'''
+        s = replaceRange026f(s, "    private final Runnable finishAfterDrain = new Runnable() {",
+                "    private final Runnable watchdog = new Runnable() {", finishRunnable, "finish phase")
+
+        if (!s.contains("TranscriptFinalProofreaderV026.proofread")) {
+            String m = "            finalText = ContextCorrectionEngine.refineTranscript(program, finalText);\n"
+            if (!s.contains(m)) throw new GradleException("v0.26 fixed: precision marker missing")
+            s = s.replace(m, m
+                    + "            String beforeProofV026 = finalText;\n"
+                    + "            finalText = TranscriptFinalProofreaderV026.proofread(this, program, finalText);\n"
+                    + "            diag(\"final_proofread_v026\", \"beforeChars=\" + beforeProofV026.length()\n"
+                    + "                    + \";afterChars=\" + finalText.length());\n")
+        }
+        if (!s.contains("music_title_search_stats")) {
+            String m = "            diag(\"future_schedule_stats\", KerekereFutureScheduleContext.stats());\n"
+            if (!s.contains(m)) throw new GradleException("v0.26 fixed: future stats marker missing")
+            s = s.replace(m, m + "            diag(\"music_title_search_stats\", OnlineMusicTitleFallbackV026.stats());\n")
+        }
+        serviceFile.write(s, "UTF-8")
+
+        File formatterFile = file("src/main/java/com/example/radikotranscriber/TranscriptSentenceFormatter.java")
+        String f = formatterFile.getText("UTF-8")
+        if (!f.contains("formatBlockPreservingParagraphs")) {
+            String m = "    public static boolean isTopicStarter(String line) {"
+            int at = f.indexOf(m)
+            if (at < 0) throw new GradleException("v0.26 fixed: formatter marker missing")
+            String method = '''    public static String formatBlockPreservingParagraphs(String text) {
+        if (text == null || text.trim().isEmpty()) return "";
+        String src = text.trim();
+        StringBuilder out = new StringBuilder();
+        for (String paragraph : src.split("\\n[ \\t]*\\n+", -1)) {
+            StringBuilder p = new StringBuilder();
+            for (String rawLine : paragraph.split("\\n")) {
+                String line = rawLine.trim();
+                if (line.isEmpty()) continue;
+                String formatted = formatBlock(line, true);
+                if (formatted.isEmpty()) continue;
+                if (p.length() > 0) p.append('\\n');
+                p.append(formatted);
+            }
+            if (p.length() == 0) continue;
+            if (out.length() > 0) out.append("\\n\\n");
+            out.append(p);
+        }
+        return out.toString().trim();
+    }
+
+'''
+            f = f.substring(0, at) + method + f.substring(at)
+        }
+        formatterFile.write(f, "UTF-8")
+
+        // Avoid quadratic full-transcript edit-summary cost on 8k+ character episodes.
+        File proofFile = file("src/main/java/com/example/radikotranscriber/TranscriptFinalProofreaderV026.java")
+        String p = proofFile.getText("UTF-8").replace("> 12000", "> 3000")
+        proofFile.write(p, "UTF-8")
+
+        File episodeFile = file("src/main/java/com/example/radikotranscriber/EpisodeStore.java")
+        String e = episodeFile.getText("UTF-8")
+        String biasMethod = '''    public ArrayList<String> getBiasStrings(String program, String title) {
+        LinkedHashSet<String> set = new LinkedHashSet<>();
+        for (String term : KerekereFixedTemplate.biasTerms(program)) {
+            if (set.size() >= 11) break;
+            set.add(term);
+        }
+        if (KerekereContextProfile.applies(program)) {
+            set.add("ななお");
+            set.add("ガンバレないわ");
+            set.add("しゃかかな");
+            set.add("HALCALI");
+            set.add("今日の私はキゲンがいい");
+            set.add("THE MODS");
+            set.add("ごきげんRADIO");
+        }
+        for (String term : KerekereFutureScheduleContext.biasTerms(program)) {
+            if (set.size() >= 32) break;
+            set.add(term);
+        }
+        for (String term : KerekereOfficialKnowledge.biasTerms(program)) {
+            if (set.size() >= 43) break;
+            set.add(term);
+        }
+        for (String term : KerekereV023Bias.biasTerms(program)) {
+            if (set.size() >= 46) break;
+            set.add(term);
+        }
+        for (String term : KerekereProgramStructure.biasTerms(program, title)) {
+            if (set.size() >= 48) break;
+            set.add(term);
+        }
+        for (String term : KerekereContextProfile.biasTerms(program)) {
+            if (set.size() >= 50) break;
+            set.add(term);
+        }
+        if (set.size() < 50) addUsefulBias(set, safe(title));
+        if (set.size() < 50) addUsefulBias(set, safe(program));
+        ArrayList<String> out = new ArrayList<>(set);
+        return out.size() <= 50 ? out : new ArrayList<>(out.subList(0, 50));
+    }
+
+'''
+        e = replaceRange026f(e, "    public ArrayList<String> getBiasStrings(String program, String title) {",
+                "    private void addUsefulBias(LinkedHashSet<String> set, String s) {", biasMethod, "bias strings")
+        episodeFile.write(e, "UTF-8")
+
+        File diagnosticFile = file("src/main/java/com/example/radikotranscriber/DiagnosticStore.java")
+        String d = diagnosticFile.getText("UTF-8")
+        d = d.replace("radiko-transcriber-diagnostics-v10", "radiko-transcriber-diagnostics-v11")
+        if (!d.contains("candidateDecisionV026")) {
+            String m = "                o.put(\"onlineSearchV025\", OnlineEntityVerifierV4.VERSION);"
+            if (!d.contains(m)) throw new GradleException("v0.26 fixed: diagnostic marker missing")
+            d = d.replace(m, m + "\n"
+                    + "                o.put(\"candidateDecisionV026\", KerekereCandidateDecisionEngine.VERSION);\n"
+                    + "                o.put(\"selectiveRerecognitionV026\", SelectiveRerecognitionEngineV026.VERSION);\n"
+                    + "                o.put(\"finalProofreaderV026\", TranscriptFinalProofreaderV026.VERSION);\n"
+                    + "                o.put(\"musicTitleFallbackV026\", OnlineMusicTitleFallbackV026.VERSION);\n"
+                    + "                o.put(\"editSummaryV026\", TranscriptFinalProofreaderV026.editSummary(e.autoTranscript, e.transcript));")
+        }
+        diagnosticFile.write(d, "UTF-8")
+
+        File layout = file("src/main/res/layout/activity_main.xml")
+        String x = layout.getText("UTF-8")
+                .replace("v0.25", "v0.26")
+                .replace("未来予定候補 / 公式情報更新 / 曲名照合v4 / 安定認識",
+                        "怪しい箇所だけ再認識 / 番組状態+未来予定 / 全文自動校閲 / 安定認識")
+        layout.write(x, "UTF-8")
+    }
+}
