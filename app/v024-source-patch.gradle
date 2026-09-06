@@ -1,0 +1,108 @@
+// v0.24 stability-first precision patch.
+// Audio capture/checkpoint/replay from v0.21 remains untouched. This patch changes only text
+// merging, fixed/show knowledge and the optional fail-open online verifier.
+
+def replaceRange024 = { String text, String startMarker, String endMarker, String replacement, String label ->
+    int a = text.indexOf(startMarker)
+    if (a < 0) throw new GradleException("v0.24 patch: start marker not found: " + label)
+    int b = text.indexOf(endMarker, a)
+    if (b < 0) throw new GradleException("v0.24 patch: end marker not found: " + label)
+    return text.substring(0, a) + replacement + text.substring(b)
+}
+
+tasks.named("preBuild").configure {
+    doLast {
+        File serviceFile = file("src/main/java/com/example/radikotranscriber/TranscribeService.java")
+        String s = serviceFile.getText("UTF-8")
+
+        // v0.23's online extractor still generated prose queries. V3 is cue-anchored and API work
+        // remains entirely outside audio/recognizer threads.
+        s = s.replace("OnlineEntityVerifierV2.", "OnlineEntityVerifierV3.")
+
+        if (!s.contains("KerekereOfficialKnowledge.scoreCandidate")) {
+            String marker = "            score += KerekereObservedCorrectionsV023.scoreCandidate(program, c, finalText);\n"
+            if (!s.contains(marker)) throw new GradleException("v0.24 patch: candidate score marker missing")
+            s = s.replace(marker, marker
+                    + "            score += KerekereOfficialKnowledge.scoreCandidate(program, c, finalText);\n")
+        }
+        serviceFile.write(s, "UTF-8")
+
+        File contextFile = file("src/main/java/com/example/radikotranscriber/ContextCorrectionEngine.java")
+        String c = contextFile.getText("UTF-8")
+        c = c.replace("OnlineEntityVerifierV2.", "OnlineEntityVerifierV3.")
+        if (!c.contains("KerekereOfficialKnowledge.refine")) {
+            String marker = "        s = KerekereObservedCorrectionsV023.refine(program, previousText, s);\n"
+            if (!c.contains(marker)) throw new GradleException("v0.24 patch: context marker missing")
+            c = c.replace(marker, marker
+                    + "        s = KerekereOfficialKnowledge.refine(program, previousText, s);\n")
+        }
+        contextFile.write(c, "UTF-8")
+
+        File episodeFile = file("src/main/java/com/example/radikotranscriber/EpisodeStore.java")
+        String e = episodeFile.getText("UTF-8")
+        String biasMethod = '''    public ArrayList<String> getBiasStrings(String program, String title) {
+        LinkedHashSet<String> set = new LinkedHashSet<>();
+
+        // Guaranteed recurring wording first, then the bundled official snapshot. The online layer
+        // is a fallback and is never required for these names to reach SpeechRecognizer.
+        for (String term : KerekereFixedTemplate.biasTerms(program)) {
+            if (set.size() >= 14) break;
+            set.add(term);
+        }
+        for (String term : KerekereOfficialKnowledge.biasTerms(program)) {
+            if (set.size() >= 38) break;
+            set.add(term);
+        }
+        for (String term : KerekereV023Bias.biasTerms(program)) {
+            if (set.size() >= 43) break;
+            set.add(term);
+        }
+        for (String term : KerekereProgramStructure.biasTerms(program, title)) {
+            if (set.size() >= 46) break;
+            set.add(term);
+        }
+        for (String term : KerekereVerifiedLexicon.biasTerms(program)) {
+            if (set.size() >= 48) break;
+            set.add(term);
+        }
+        for (String term : KerekereContextProfile.biasTerms(program)) {
+            if (set.size() >= 50) break;
+            set.add(term);
+        }
+        if (set.size() < 50) addUsefulBias(set, safe(title));
+        if (set.size() < 50) addUsefulBias(set, safe(program));
+        ArrayList<String> out = new ArrayList<>(set);
+        return out.size() <= 50 ? out : new ArrayList<>(out.subList(0, 50));
+    }
+
+'''
+        e = replaceRange024(e,
+                "    public ArrayList<String> getBiasStrings(String program, String title) {",
+                "    private void addUsefulBias(LinkedHashSet<String> set, String s) {",
+                biasMethod,
+                "v0.24 offline-first bias strings")
+        episodeFile.write(e, "UTF-8")
+
+        File diagnosticFile = file("src/main/java/com/example/radikotranscriber/DiagnosticStore.java")
+        String d = diagnosticFile.getText("UTF-8")
+        d = d.replace("radiko-transcriber-diagnostics-v8", "radiko-transcriber-diagnostics-v9")
+        d = d.replace("OnlineEntityVerifierV2.VERSION", "OnlineEntityVerifierV3.VERSION")
+        d = d.replace("strong-pair-only-v023", "cue-anchored-pairs-only-v024")
+        if (!d.contains("officialKnowledge")) {
+            String marker = "                o.put(\"v023Bias\", KerekereV023Bias.VERSION);"
+            if (!d.contains(marker)) throw new GradleException("v0.24 patch: diagnostic marker missing")
+            d = d.replace(marker, marker + "\n"
+                    + "                o.put(\"officialKnowledge\", KerekereOfficialKnowledge.VERSION);\n"
+                    + "                o.put(\"boundaryDedupe\", RecognitionTextMerger.VERSION);\n"
+                    + "                o.put(\"coldOpenTemplate\", KerekereFixedTemplate.VERSION);")
+        }
+        diagnosticFile.write(d, "UTF-8")
+
+        File layout = file("src/main/res/layout/activity_main.xml")
+        String x = layout.getText("UTF-8")
+        x = x.replace("v0.23", "v0.24")
+        x = x.replace("冒頭定型強化 / 曲名・固有名詞照合v2 / 未確定音声保護 / 一文一行",
+                "冒頭挨拶保証 / 公式知識内蔵 / 境界重複抑制 / 固有名詞照合v3")
+        layout.write(x, "UTF-8")
+    }
+}
