@@ -54,6 +54,7 @@ public final class RecognitionTextMerger {
                     exactOverlap, 1.0, false, "exact_delta");
         }
 
+        // Existing equal-length fuzzy pass: useful for long cumulative recognizer returns.
         int max = Math.min(Math.min(a.length(), b.length()), 700);
         int min = Math.min(max, Math.max(24, Math.min(90, b.length() / 3)));
         int bestLen = 0;
@@ -71,39 +72,47 @@ public final class RecognitionTextMerger {
             }
             if (len >= 120 && sim >= 0.96) break;
         }
-
         if (bestLen >= min && bestSimilarity >= 0.90) {
-            MergeResult r = fuzzyResult(original, b.length(), bestLen, bestLen,
-                    bestSimilarity, "fuzzy");
+            MergeResult r = fuzzyResult(original, b.length(), bestLen,
+                    bestSimilarity, "fuzzy", false);
             if (r != null) return r;
         }
 
-        // v0.24: replay boundaries can add/drop a few characters, so an equal-length comparison can
-        // miss a real overlap. Elastic matching is restricted to the immediate boundary and 144
-        // compact characters. A 18-23 character overlap needs 94% similarity; >=24 needs 91%.
+        // v0.24: a replay boundary can insert/delete a couple of characters, so the repeated suffix
+        // and prefix are not necessarily the same length. A semiglobal edit-distance pass compares
+        // the final 144 chars to the first 144 chars in O(n^2), rather than running hundreds of full
+        // Levenshtein comparisons.
         ElasticMatch elastic = elasticSuffixPrefix(a, b);
         if (elastic != null) {
-            MergeResult r = fuzzyResult(original, b.length(), elastic.suffixChars,
-                    elastic.prefixChars, elastic.similarity, "elastic_fuzzy");
+            MergeResult r = fuzzyResult(original, b.length(), elastic.prefixChars,
+                    elastic.similarity, "elastic_fuzzy", true);
             if (r != null) return r;
+        }
+
+        // Sometimes the new chunk begins with a genuine bridge word ("あと", "そして"...) and
+        // then repeats the preceding sentence. Preserve the bridge word while removing only the
+        // repeated material after it.
+        BridgeMatch bridge = bridgeOverlap(a, b);
+        if (bridge != null) {
+            int cut = approximateCut(original, bridge.markerChars + bridge.match.prefixChars);
+            String delta = original.substring(Math.min(cut, original.length())).trim();
+            String append = bridge.marker + (delta.isEmpty() ? "" : " " + delta);
+            return new MergeResult(append, bridge.match.prefixChars, bridge.match.similarity,
+                    false, "elastic_bridge_delta");
         }
 
         return new MergeResult(original, 0, 0.0, false, "independent");
     }
 
     private static MergeResult fuzzyResult(String original, int candidateCompactLength,
-                                           int suffixChars, int prefixChars,
-                                           double similarity, String reasonPrefix) {
+                                           int prefixChars, double similarity,
+                                           String reasonPrefix, boolean elastic) {
         int novelty = candidateCompactLength - prefixChars;
-        boolean elastic = reasonPrefix.startsWith("elastic");
         boolean strongEnough = prefixChars >= 24 ? similarity >= 0.91
                 : prefixChars >= 18 && similarity >= (elastic ? 0.94 : 0.96);
         if (!strongEnough) return null;
 
         double coverage = prefixChars / (double)Math.max(1, candidateCompactLength);
-        // The old equal-length fuzzy pass keeps the conservative coverage check. Elastic matching is
-        // specifically for a repeated prefix followed by a long new continuation, so coverage of
-        // the entire candidate is intentionally not required there.
         if (!elastic && prefixChars < 40 && coverage < 0.52) return null;
 
         if (novelty <= 2) {
@@ -123,34 +132,66 @@ public final class RecognitionTextMerger {
         return null;
     }
 
+    /** Minimum edit alignment between any suffix of A and any >=18-char prefix of B. */
     private static ElasticMatch elasticSuffixPrefix(String a, String b) {
-        int maxPrefix = Math.min(Math.min(b.length(), 144), a.length());
-        if (maxPrefix < 18) return null;
-        ElasticMatch best = null;
+        String left = a.substring(Math.max(0, a.length() - 144));
+        String right = b.substring(0, Math.min(144, b.length()));
+        int m = left.length(), n = right.length();
+        if (m < 18 || n < 18) return null;
 
-        for (int prefix = maxPrefix; prefix >= 18; prefix -= 3) {
-            int low = Math.max(18, prefix - 9);
-            int high = Math.min(Math.min(a.length(), 144), prefix + 9);
-            for (int suffix = low; suffix <= high; suffix += 3) {
-                int lengthDiff = Math.abs(suffix - prefix);
-                int scale = Math.max(suffix, prefix);
-                int allowed = Math.max(lengthDiff + 1,
-                        Math.min(14, (int)Math.ceil(scale * 0.11)));
-                String left = a.substring(a.length() - suffix);
-                String right = b.substring(0, prefix);
-                int d = levenshteinWithin(left, right, allowed);
-                if (d > allowed) continue;
-                double sim = 1.0 - (d / (double)Math.max(1, scale));
-                if (prefix < 24 && sim < 0.94) continue;
-                if (prefix >= 24 && sim < 0.91) continue;
-                double score = sim + Math.min(0.08, prefix / 1800.0);
-                if (best == null || score > best.score
-                        || (Math.abs(score - best.score) < 0.0001 && prefix > best.prefixChars)) {
-                    best = new ElasticMatch(suffix, prefix, sim, score);
+        int[][] cost = new int[m + 1][n + 1];
+        int[][] start = new int[m + 1][n + 1];
+        // Prefix of A is free: an alignment may start anywhere, but must end at A's final char.
+        for (int i = 0; i <= m; i++) { cost[i][0] = 0; start[i][0] = i; }
+        for (int j = 1; j <= n; j++) { cost[0][j] = j; start[0][j] = 0; }
+
+        for (int i = 1; i <= m; i++) {
+            for (int j = 1; j <= n; j++) {
+                int bestCost = cost[i - 1][j - 1] + (left.charAt(i - 1) == right.charAt(j - 1) ? 0 : 1);
+                int bestStart = start[i - 1][j - 1];
+
+                int del = cost[i - 1][j] + 1;
+                int delStart = start[i - 1][j];
+                if (del < bestCost || (del == bestCost && delStart < bestStart)) {
+                    bestCost = del; bestStart = delStart;
                 }
+                int ins = cost[i][j - 1] + 1;
+                int insStart = start[i][j - 1];
+                if (ins < bestCost || (ins == bestCost && insStart < bestStart)) {
+                    bestCost = ins; bestStart = insStart;
+                }
+                cost[i][j] = bestCost;
+                start[i][j] = bestStart;
+            }
+        }
+
+        ElasticMatch best = null;
+        for (int prefix = 18; prefix <= n; prefix++) {
+            int suffix = m - start[m][prefix];
+            if (suffix < 18) continue;
+            int scale = Math.max(suffix, prefix);
+            double sim = 1.0 - cost[m][prefix] / (double)Math.max(1, scale);
+            double threshold = prefix < 24 ? 0.94 : 0.91;
+            if (sim < threshold) continue;
+            double score = sim + Math.min(0.08, prefix / 1800.0);
+            if (best == null || score > best.score
+                    || (Math.abs(score - best.score) < 0.0001 && prefix > best.prefixChars)) {
+                best = new ElasticMatch(suffix, prefix, sim, score);
             }
         }
         return best;
+    }
+
+    private static BridgeMatch bridgeOverlap(String a, String b) {
+        String[] markers = {"ちなみに", "そして", "それで", "なので", "だから", "でも", "あと"};
+        for (String marker : markers) {
+            String mc = compact(marker);
+            if (!b.startsWith(mc) || b.length() <= mc.length() + 18) continue;
+            ElasticMatch match = elasticSuffixPrefix(a, b.substring(mc.length()));
+            if (match == null || match.prefixChars < 18 || match.similarity < 0.94) continue;
+            return new BridgeMatch(marker, mc.length(), match);
+        }
+        return null;
     }
 
     private static int exactSuffixPrefix(String a, String b, int limit) {
@@ -189,8 +230,8 @@ public final class RecognitionTextMerger {
             cur[0] = i;
             int rowMin = cur[0];
             for (int j = 1; j <= b.length(); j++) {
-                int cost = a.charAt(i - 1) == b.charAt(j - 1) ? 0 : 1;
-                cur[j] = Math.min(Math.min(cur[j - 1] + 1, prev[j] + 1), prev[j - 1] + cost);
+                int x = a.charAt(i - 1) == b.charAt(j - 1) ? 0 : 1;
+                cur[j] = Math.min(Math.min(cur[j - 1] + 1, prev[j] + 1), prev[j - 1] + x);
                 rowMin = Math.min(rowMin, cur[j]);
             }
             if (rowMin > maxDistance) return maxDistance + 1;
@@ -209,6 +250,17 @@ public final class RecognitionTextMerger {
             this.prefixChars = prefixChars;
             this.similarity = similarity;
             this.score = score;
+        }
+    }
+
+    private static final class BridgeMatch {
+        final String marker;
+        final int markerChars;
+        final ElasticMatch match;
+        BridgeMatch(String marker, int markerChars, ElasticMatch match) {
+            this.marker = marker;
+            this.markerChars = markerChars;
+            this.match = match;
         }
     }
 }
