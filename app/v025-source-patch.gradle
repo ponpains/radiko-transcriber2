@@ -1,0 +1,152 @@
+// v0.25 precision/context patch.
+// The v0.21 audio checkpoint/replay transport is deliberately untouched.  This layer only changes
+// show vocabulary, optional public-web context, proper-noun verification and final text cleanup.
+
+def replaceRange025 = { String text, String startMarker, String endMarker, String replacement, String label ->
+    int a = text.indexOf(startMarker)
+    if (a < 0) throw new GradleException("v0.25 patch: start marker not found: " + label)
+    int b = text.indexOf(endMarker, a)
+    if (b < 0) throw new GradleException("v0.25 patch: end marker not found: " + label)
+    return text.substring(0, a) + replacement + text.substring(b)
+}
+
+tasks.named("preBuild").configure {
+    doLast {
+        File serviceFile = file("src/main/java/com/example/radikotranscriber/TranscribeService.java")
+        String s = serviceFile.getText("UTF-8")
+
+        // V4 adds an iTunes pair lookup before the existing MusicBrainz/Wikidata fallback.  It is
+        // still cue-anchored and asynchronous, so search cannot block or restart audio recognition.
+        s = s.replace("OnlineEntityVerifierV3.", "OnlineEntityVerifierV4.")
+
+        // Load bundled future vocabulary synchronously; refresh the official schedule/news pages in
+        // the background.  The initial recognizer therefore always has a useful offline snapshot.
+        if (!s.contains("KerekereFutureScheduleContext.beginEpisode")) {
+            String marker = '''            OnlineEntityVerifierV4.beginEpisode(this, program,
+                    episodeTitle + " " + episodeHints, "internal".equals(mode),
+                    (kind, detail) -> diag(kind, detail));'''
+            if (!s.contains(marker)) throw new GradleException("v0.25 patch: online begin marker missing")
+            s = s.replace(marker,
+                    '''            KerekereFutureScheduleContext.beginEpisode(this, program, "internal".equals(mode),
+                    (kind, detail) -> diag(kind, detail));
+''' + marker)
+        }
+
+        if (!s.contains("KerekereFutureScheduleContext.scoreCandidate")) {
+            String marker = "            score += KerekereObservedCorrectionsV024.scoreCandidate(program, c, finalText);\n"
+            if (!s.contains(marker)) throw new GradleException("v0.25 patch: v024 score marker missing")
+            s = s.replace(marker, marker
+                    + "            score += KerekereFutureScheduleContext.scoreCandidate(program, c, finalText);\n"
+                    + "            score += KerekereObservedCorrectionsV025.scoreCandidate(program, c, finalText);\n")
+        }
+
+        // Include schedule-refresh health next to the optional search diagnostics.
+        if (!s.contains("future_schedule_stats")) {
+            String marker = "            diag(\"online_entity_stats\", OnlineEntityVerifierV4.stats());\n"
+            if (!s.contains(marker)) throw new GradleException("v0.25 patch: online stats marker missing")
+            s = s.replace(marker, marker
+                    + "            diag(\"future_schedule_stats\", KerekereFutureScheduleContext.stats());\n")
+        }
+        serviceFile.write(s, "UTF-8")
+
+        File contextFile = file("src/main/java/com/example/radikotranscriber/ContextCorrectionEngine.java")
+        String c = contextFile.getText("UTF-8")
+        c = c.replace("OnlineEntityVerifierV3.", "OnlineEntityVerifierV4.")
+        if (!c.contains("KerekereFutureScheduleContext.refine")) {
+            String marker = "        s = KerekereObservedCorrectionsV024.refine(program, previousText, s);\n"
+            if (!c.contains(marker)) throw new GradleException("v0.25 patch: v024 context marker missing")
+            c = c.replace(marker, marker
+                    + "        s = KerekereFutureScheduleContext.refine(program, previousText, s);\n"
+                    + "        s = KerekereObservedCorrectionsV025.refine(program, previousText, s);\n")
+        }
+        if (!c.contains("KerekereObservedCorrectionsV025.refineTranscript")) {
+            String marker = "        result = KerekereFixedTemplate.refineTranscript(program, result);\n"
+            if (!c.contains(marker)) throw new GradleException("v0.25 patch: final template marker missing")
+            c = c.replace(marker, marker
+                    + "        result = KerekereObservedCorrectionsV025.refineTranscript(program, result);\n")
+        }
+        contextFile.write(c, "UTF-8")
+
+        File episodeFile = file("src/main/java/com/example/radikotranscriber/EpisodeStore.java")
+        String e = episodeFile.getText("UTF-8")
+        String biasMethod = '''    public ArrayList<String> getBiasStrings(String program, String title) {
+        LinkedHashSet<String> set = new LinkedHashSet<>();
+
+        // 1) Recurring title/opening wording is still the highest priority.
+        for (String term : KerekereFixedTemplate.biasTerms(program)) {
+            if (set.size() >= 12) break;
+            set.add(term);
+        }
+
+        // 2) User/high-frequency radio names must never be crowded out by one-off event names.
+        if (KerekereContextProfile.applies(program)) {
+            set.add("ななお");
+            set.add("ガンバレないわ");
+            set.add("しゃかかな");
+        }
+
+        // 3) Current/future official schedule vocabulary. The bundled snapshot is available on the
+        // very first session; a successful background refresh is picked up by later rotations.
+        for (String term : KerekereFutureScheduleContext.biasTerms(program)) {
+            if (set.size() >= 29) break;
+            set.add(term);
+        }
+
+        // 4) Stable show/group vocabulary and older-episode announcement names.
+        for (String term : KerekereOfficialKnowledge.biasTerms(program)) {
+            if (set.size() >= 42) break;
+            set.add(term);
+        }
+        for (String term : KerekereV023Bias.biasTerms(program)) {
+            if (set.size() >= 45) break;
+            set.add(term);
+        }
+        for (String term : KerekereProgramStructure.biasTerms(program, title)) {
+            if (set.size() >= 47) break;
+            set.add(term);
+        }
+        for (String term : KerekereVerifiedLexicon.biasTerms(program)) {
+            if (set.size() >= 49) break;
+            set.add(term);
+        }
+        for (String term : KerekereContextProfile.biasTerms(program)) {
+            if (set.size() >= 50) break;
+            set.add(term);
+        }
+        if (set.size() < 50) addUsefulBias(set, safe(title));
+        if (set.size() < 50) addUsefulBias(set, safe(program));
+        ArrayList<String> out = new ArrayList<>(set);
+        return out.size() <= 50 ? out : new ArrayList<>(out.subList(0, 50));
+    }
+
+'''
+        e = replaceRange025(e,
+                "    public ArrayList<String> getBiasStrings(String program, String title) {",
+                "    private void addUsefulBias(LinkedHashSet<String> set, String s) {",
+                biasMethod,
+                "v0.25 future-aware bias strings")
+        episodeFile.write(e, "UTF-8")
+
+        File diagnosticFile = file("src/main/java/com/example/radikotranscriber/DiagnosticStore.java")
+        String d = diagnosticFile.getText("UTF-8")
+        d = d.replace("radiko-transcriber-diagnostics-v9", "radiko-transcriber-diagnostics-v10")
+        d = d.replace("OnlineEntityVerifierV3.VERSION", "OnlineEntityVerifierV4.VERSION")
+        d = d.replace("cue-anchored-pairs-only-v024", "itunes-pair-first-v025")
+        if (!d.contains("futureScheduleContext")) {
+            String marker = "                o.put(\"observedCorrectionsV024\", KerekereObservedCorrectionsV024.VERSION);"
+            if (!d.contains(marker)) throw new GradleException("v0.25 patch: diagnostic v024 marker missing")
+            d = d.replace(marker, marker + "\n"
+                    + "                o.put(\"futureScheduleContext\", KerekereFutureScheduleContext.VERSION);\n"
+                    + "                o.put(\"observedCorrectionsV025\", KerekereObservedCorrectionsV025.VERSION);\n"
+                    + "                o.put(\"onlineSearchV025\", OnlineEntityVerifierV4.VERSION);")
+        }
+        diagnosticFile.write(d, "UTF-8")
+
+        File layout = file("src/main/res/layout/activity_main.xml")
+        String x = layout.getText("UTF-8")
+        x = x.replace("v0.24", "v0.25")
+        x = x.replace("冒頭挨拶保証 / 公式知識内蔵 / 境界重複抑制 / 固有名詞照合v3",
+                "未来予定候補 / 公式情報更新 / 曲名照合v4 / 安定認識")
+        layout.write(x, "UTF-8")
+    }
+}
