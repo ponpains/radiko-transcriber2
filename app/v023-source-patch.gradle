@@ -1,0 +1,131 @@
+// v0.23 precision patch.  Transport/checkpoint behavior from v0.21 is deliberately untouched.
+// This patch only changes language/context/search layers so the new online work cannot destabilize
+// audio capture or recognizer replay.
+
+def replaceRange023 = { String text, String startMarker, String endMarker, String replacement, String label ->
+    int a = text.indexOf(startMarker)
+    if (a < 0) throw new GradleException("v0.23 patch: start marker not found: " + label)
+    int b = text.indexOf(endMarker, a)
+    if (b < 0) throw new GradleException("v0.23 patch: end marker not found: " + label)
+    return text.substring(0, a) + replacement + text.substring(b)
+}
+
+tasks.named("preBuild").configure {
+    doLast {
+        File serviceFile = file("src/main/java/com/example/radikotranscriber/TranscribeService.java")
+        String s = serviceFile.getText("UTF-8")
+
+        // Swap the v0.22 generic-token resolver for the v0.23 strong-structure resolver.
+        s = s.replace("OnlineEntityVerifier.", "OnlineEntityVerifierV2.")
+
+        // Search the locally corrected chunk rather than the raw N-best winner.  This greatly
+        // reduces nonsense queries while keeping all HTTP on the separate background executor.
+        String oldObserve = '''        OnlineEntityVerifierV2.observe(program, finalText, selected,
+                (kind, detail) -> diag(kind, detail));
+'''
+        s = s.replace(oldObserve, "")
+        String correctionLine = "        String corrected = ContextCorrectionEngine.refine(program, finalText, lexical).trim();\n"
+        if (!s.contains("OnlineEntityVerifierV2.observe(program, finalText, corrected")) {
+            if (!s.contains(correctionLine)) throw new GradleException("v0.23 patch: corrected line missing")
+            s = s.replace(correctionLine, correctionLine
+                    + "        OnlineEntityVerifierV2.observe(program, finalText, corrected,\n"
+                    + "                (kind, detail) -> diag(kind, detail));\n")
+        }
+
+        if (!s.contains("KerekereObservedCorrectionsV023.scoreCandidate")) {
+            s = s.replace(
+                    "            score += KerekereVerifiedLexicon.scoreCandidate(program, c, finalText);\n"
+                            + "            score += OnlineEntityVerifierV2.scoreCandidate(program, c);",
+                    "            score += KerekereVerifiedLexicon.scoreCandidate(program, c, finalText);\n"
+                            + "            score += KerekereObservedCorrectionsV023.scoreCandidate(program, c, finalText);\n"
+                            + "            score += OnlineEntityVerifierV2.scoreCandidate(program, c);")
+        }
+        serviceFile.write(s, "UTF-8")
+
+        // Layer the latest diagnostic corrections between the stable verified lexicon and the fixed
+        // opening/ending templates. Online aliases remain last because they are optional.
+        File contextFile = file("src/main/java/com/example/radikotranscriber/ContextCorrectionEngine.java")
+        String c = contextFile.getText("UTF-8")
+        c = c.replace("OnlineEntityVerifier.", "OnlineEntityVerifierV2.")
+        if (!c.contains("KerekereObservedCorrectionsV023.refine")) {
+            c = c.replace(
+                    "        s = KerekereVerifiedLexicon.refine(program, previousText, s);\n"
+                            + "        s = KerekereFixedTemplate.refineSegment(program, previousText, s);",
+                    "        s = KerekereVerifiedLexicon.refine(program, previousText, s);\n"
+                            + "        s = KerekereObservedCorrectionsV023.refine(program, previousText, s);\n"
+                            + "        s = KerekereFixedTemplate.refineSegment(program, previousText, s);")
+        }
+        contextFile.write(c, "UTF-8")
+
+        File episodeFile = file("src/main/java/com/example/radikotranscriber/EpisodeStore.java")
+        String e = episodeFile.getText("UTF-8")
+        String biasMethod = '''    public ArrayList<String> getBiasStrings(String program, String title) {
+        LinkedHashSet<String> set = new LinkedHashSet<>();
+
+        // Recurring wording and the user's important radio names are never allowed to be crowded
+        // out by one-off learned corrections.
+        for (String term : KerekereFixedTemplate.biasTerms(program)) {
+            if (set.size() >= 12) break;
+            set.add(term);
+        }
+        for (String term : KerekereV023Bias.biasTerms(program)) {
+            if (set.size() >= 25) break;
+            set.add(term);
+        }
+        for (String term : KerekereProgramStructure.biasTerms(program, title)) {
+            if (set.size() >= 34) break;
+            set.add(term);
+        }
+        for (String term : KerekereVerifiedLexicon.biasTerms(program)) {
+            if (set.size() >= 42) break;
+            set.add(term);
+        }
+        for (String term : KerekereContextBoost.biasTerms(program)) {
+            if (set.size() >= 46) break;
+            set.add(term);
+        }
+        for (String term : KerekereContextProfile.biasTerms(program)) {
+            if (set.size() >= 49) break;
+            set.add(term);
+        }
+        if (set.size() < 50) addUsefulBias(set, safe(title));
+        if (set.size() < 50) addUsefulBias(set, safe(program));
+        for (Correction r : getCorrections(program)) {
+            if (set.size() >= 50) break;
+            String corrected = normalizeLexical(r.correct);
+            if (corrected.length() >= 2 && corrected.length() <= 30) set.add(corrected);
+        }
+        ArrayList<String> out = new ArrayList<>(set);
+        return out.size() <= 50 ? out : new ArrayList<>(out.subList(0, 50));
+    }
+
+'''
+        e = replaceRange023(e,
+                "    public ArrayList<String> getBiasStrings(String program, String title) {",
+                "    private void addUsefulBias(LinkedHashSet<String> set, String s) {",
+                biasMethod,
+                "v0.23 prioritized bias strings")
+        episodeFile.write(e, "UTF-8")
+
+        File diagnosticFile = file("src/main/java/com/example/radikotranscriber/DiagnosticStore.java")
+        String d = diagnosticFile.getText("UTF-8")
+        d = d.replace("radiko-transcriber-diagnostics-v7", "radiko-transcriber-diagnostics-v8")
+        d = d.replace("OnlineEntityVerifier.VERSION", "OnlineEntityVerifierV2.VERSION")
+        if (!d.contains("observedCorrectionsV023")) {
+            d = d.replace(
+                    "                o.put(\"onlineEntityVerifier\", OnlineEntityVerifierV2.VERSION);",
+                    "                o.put(\"onlineEntityVerifier\", OnlineEntityVerifierV2.VERSION);\n"
+                            + "                o.put(\"searchStrategy\", \"strong-pair-only-v023\");\n"
+                            + "                o.put(\"observedCorrectionsV023\", KerekereObservedCorrectionsV023.VERSION);\n"
+                            + "                o.put(\"v023Bias\", KerekereV023Bias.VERSION);")
+        }
+        diagnosticFile.write(d, "UTF-8")
+
+        File layout = file("src/main/res/layout/activity_main.xml")
+        String x = layout.getText("UTF-8")
+        x = x.replace("v0.22", "v0.23")
+        x = x.replace("定型文保証 / オンライン固有名詞照合 / 未確定音声保護 / 一文一行",
+                "冒頭定型強化 / 曲名・固有名詞照合v2 / 未確定音声保護 / 一文一行")
+        layout.write(x, "UTF-8")
+    }
+}
