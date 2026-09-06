@@ -39,7 +39,6 @@ public final class RecognitionTextMerger {
         if (b.isEmpty()) return new MergeResult("", 0, 1.0, true, "empty_compact");
         if (a.isEmpty()) return new MergeResult(original, 0, 0.0, false, "first");
 
-        // Exact recent containment first.
         int exactIndex = a.lastIndexOf(b);
         if (exactIndex >= 0 && exactIndex + b.length() >= a.length() - 6) {
             return new MergeResult("", b.length(), 1.0, true, "exact_recent");
@@ -55,7 +54,6 @@ public final class RecognitionTextMerger {
                     exactOverlap, 1.0, false, "exact_delta");
         }
 
-        // Fuzzy cumulative-result detection for equal-length overlap.
         int max = Math.min(Math.min(a.length(), b.length()), 700);
         int min = Math.min(max, Math.max(24, Math.min(90, b.length() / 3)));
         int bestLen = 0;
@@ -80,11 +78,9 @@ public final class RecognitionTextMerger {
             if (r != null) return r;
         }
 
-        // v0.24: recognizer replay also produces near-duplicates where one side gained/lost a few
-        // characters (e.g. "耳なじみのある曲まで" vs "耳なじみの曲まで"). Comparing only
-        // equal-length windows shifts the whole suffix and misses these. Search a deliberately small
-        // elastic window around the recent boundary. We cap this pass at 144 compact characters so
-        // it stays cheap and cannot become a global fuzzy-deletion engine.
+        // v0.24: replay boundaries can add/drop a few characters, so an equal-length comparison can
+        // miss a real overlap. Elastic matching is restricted to the immediate boundary and 144
+        // compact characters. A 18-23 character overlap needs 94% similarity; >=24 needs 91%.
         ElasticMatch elastic = elasticSuffixPrefix(a, b);
         if (elastic != null) {
             MergeResult r = fuzzyResult(original, b.length(), elastic.suffixChars,
@@ -99,20 +95,22 @@ public final class RecognitionTextMerger {
                                            int suffixChars, int prefixChars,
                                            double similarity, String reasonPrefix) {
         int novelty = candidateCompactLength - prefixChars;
+        boolean elastic = reasonPrefix.startsWith("elastic");
         boolean strongEnough = prefixChars >= 24 ? similarity >= 0.91
-                : prefixChars >= 18 && similarity >= 0.96;
+                : prefixChars >= 18 && similarity >= (elastic ? 0.94 : 0.96);
         if (!strongEnough) return null;
 
-        // For short-ish overlaps demand that they cover a large part of the candidate. This avoids
-        // deleting a genuinely repeated stock phrase such as "ありがとうございます".
         double coverage = prefixChars / (double)Math.max(1, candidateCompactLength);
-        if (prefixChars < 40 && coverage < 0.52) return null;
+        // The old equal-length fuzzy pass keeps the conservative coverage check. Elastic matching is
+        // specifically for a repeated prefix followed by a long new continuation, so coverage of
+        // the entire candidate is intentionally not required there.
+        if (!elastic && prefixChars < 40 && coverage < 0.52) return null;
 
         if (novelty <= 2) {
             return new MergeResult("", prefixChars, similarity, true,
                     reasonPrefix + "_duplicate");
         }
-        if (prefixChars >= 40 || coverage >= 0.55) {
+        if (elastic || prefixChars >= 40 || coverage >= 0.55) {
             int cut = approximateCut(original, prefixChars);
             String delta = original.substring(Math.min(cut, original.length())).trim();
             if (compact(delta).length() <= 1) {
@@ -143,7 +141,7 @@ public final class RecognitionTextMerger {
                 int d = levenshteinWithin(left, right, allowed);
                 if (d > allowed) continue;
                 double sim = 1.0 - (d / (double)Math.max(1, scale));
-                if (prefix < 24 && sim < 0.96) continue;
+                if (prefix < 24 && sim < 0.94) continue;
                 if (prefix >= 24 && sim < 0.91) continue;
                 double score = sim + Math.min(0.08, prefix / 1800.0);
                 if (best == null || score > best.score
@@ -182,7 +180,6 @@ public final class RecognitionTextMerger {
         return x.length() <= max ? x : x.substring(x.length() - max);
     }
 
-    /** Returns maxDistance+1 as soon as it is clear the strings are too different. */
     private static int levenshteinWithin(String a, String b, int maxDistance) {
         if (Math.abs(a.length() - b.length()) > maxDistance) return maxDistance + 1;
         int[] prev = new int[b.length() + 1];
