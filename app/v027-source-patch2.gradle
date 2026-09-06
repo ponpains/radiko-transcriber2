@@ -1,0 +1,316 @@
+// Compile-safe v0.27 integration. Applied after all v0.26 patches.
+def replaceRange027b = { String text, String startMarker, String endMarker, String replacement, String label ->
+    int a = text.indexOf(startMarker)
+    if (a < 0) throw new GradleException("v0.27b: start marker missing: " + label)
+    int b = text.indexOf(endMarker, a)
+    if (b < 0) throw new GradleException("v0.27b: end marker missing: " + label)
+    return text.substring(0, a) + replacement + text.substring(b)
+}
+
+tasks.named("preBuild").configure {
+    doLast {
+        File serviceFile = file("src/main/java/com/example/radikotranscriber/TranscribeService.java")
+        String s = serviceFile.getText("UTF-8")
+
+        if (!s.contains("sessionMediaStartMsV027")) {
+            String fieldMarker = '''    private volatile boolean postDrainEnhancementStartedV026 = false;
+'''
+            if (!s.contains(fieldMarker)) throw new GradleException("v0.27b: post-drain field missing")
+            s = s.replace(fieldMarker, '''    private volatile boolean postDrainEnhancementStartedV026 = false;
+    private volatile long sessionMediaStartMsV027 = 0L;
+''')
+        }
+        if (!s.contains("sessionMediaStartMsV027 = Math.max(mediaStartMs, lastSegmentEndMs);")) {
+            String resetMarker = '''        rerecognitionV026.reset();
+        frozenDurationMs = 0L;'''
+            if (!s.contains(resetMarker)) throw new GradleException("v0.27b: reset marker missing")
+            s = s.replace(resetMarker, '''        rerecognitionV026.reset();
+        sessionMediaStartMsV027 = Math.max(mediaStartMs, lastSegmentEndMs);
+        frozenDurationMs = 0L;''')
+        }
+        s = s.replace('''        return mediaStartMs + Math.max(0L, Math.round(rawAudioMs * playbackSpeed));''',
+                '''        return sessionMediaStartMsV027 + Math.max(0L, Math.round(rawAudioMs * playbackSpeed));''')
+        s = s.replace('''rerecognitionV026.run(TranscribeService.this, spoolFile, mediaStartMs,''',
+                '''rerecognitionV026.run(TranscribeService.this, spoolFile, sessionMediaStartMsV027,''')
+
+        String searchBlock = '''        OnlineEntityVerifierV4.observe(program, finalText, corrected,
+                (kind, detail) -> diag(kind, detail));
+        OnlineMusicTitleFallbackV026.observe(program, corrected,
+                (kind, detail) -> diag(kind, detail));'''
+        if (!s.contains("music_search_gate_v027") && s.contains(searchBlock)) {
+            s = s.replace(searchBlock, '''        if (KerekereObservedCorrectionsV027.isStrongMusicCue(corrected)) {
+            diag("music_search_gate_v027", "accepted=" + ContextCorrectionEngine.brief(corrected));
+            OnlineEntityVerifierV4.observe(program, finalText, corrected,
+                    (kind, detail) -> diag(kind, detail));
+            OnlineMusicTitleFallbackV026.observe(program, corrected,
+                    (kind, detail) -> diag(kind, detail));
+        }''')
+        }
+
+        s = s.replace('''finalText = TranscriptFinalProofreaderV026.proofread(this, program, finalText);''',
+                '''finalText = TranscriptFinalProofreaderV027.proofread(this, program, finalText);''')
+        s = s.replace('''diag("final_proofread_v026"''', '''diag("final_proofread_v027"''')
+        serviceFile.write(s, "UTF-8")
+
+        File contextFile = file("src/main/java/com/example/radikotranscriber/ContextCorrectionEngine.java")
+        String c = contextFile.getText("UTF-8")
+        if (!c.contains("KerekereObservedCorrectionsV027.refine(program")) {
+            String correctionMarker = '''        s = KerekereObservedCorrectionsV025.refine(program, previousText, s);
+'''
+            if (!c.contains(correctionMarker)) throw new GradleException("v0.27b: v025 correction marker missing")
+            c = c.replace(correctionMarker, '''        s = KerekereObservedCorrectionsV025.refine(program, previousText, s);
+        s = KerekereObservedCorrectionsV027.refine(program, previousText, s);
+''')
+        }
+        contextFile.write(c, "UTF-8")
+
+        File decisionFile = file("src/main/java/com/example/radikotranscriber/KerekereCandidateDecisionEngine.java")
+        String q = decisionFile.getText("UTF-8")
+        q = q.replace("candidate-decision-v026-2026-09-06", "candidate-decision-v027-2026-09-06")
+        if (!q.contains("KerekereObservedCorrectionsV027.scoreCandidate")) {
+            String scoreMarker = '''            score += KerekereObservedCorrectionsV025.scoreCandidate(program, c, previousText) * 0.82;
+'''
+            if (!q.contains(scoreMarker)) throw new GradleException("v0.27b: v025 score marker missing")
+            q = q.replace(scoreMarker, '''            score += KerekereObservedCorrectionsV025.scoreCandidate(program, c, previousText) * 0.82;
+            score += KerekereObservedCorrectionsV027.scoreCandidate(program, c, previousText) * 0.88;
+''')
+        }
+
+        String detectState = '''    public static State detectState(String previousText, String candidate) {
+        String prev = safe(previousText);
+        String c = safe(candidate);
+        String shortTail = tail(prev, 420);
+        String mediumTail = tail(prev, 850);
+        String x = shortTail + " " + c;
+
+        if (prev.length() < 300 && containsAny(x, "こんばんは", "こんばんハタハタ", "永田詩央里"))
+            return State.COLD_OPEN;
+
+        boolean openingPassed = containsAny(prev,
+                "番組の感想は ハッシュタグ 永田ラジオ", "番組の感想はハッシュタグ 永田ラジオ");
+        boolean candidateOpening = containsAny(c, "この番組はアイドルグループ",
+                "パーソナリティを務める", "金曜の夜", "ノットイコールミー永田詩央里のけれけれ");
+        boolean freshOpeningCue = !openingPassed && prev.length() < 5200
+                && containsAny(shortTail, "そろそろ始めていきましょう", "そろそろ始めて行きましょう");
+        if (candidateOpening || freshOpeningCue) return State.OPENING;
+
+        if (containsAny(x, "ここまでのお相手", "最後まで聞いていただき", "来週も聞いてけれ"))
+            return State.ENDING;
+        if (containsAny(mediumTail, "番組公式ハッシュタグ", "郵便番号010", "郵便番号 010",
+                "ABSラジオ公式サイト", "専用メールフォーム", "けれけれ係"))
+            return State.MAIL_INFO;
+        if (containsAny(c, "お知らせです", "お知らせがあります", "開催が決定", "出演します")
+                || containsAny(shortTail, "お知らせをさせてください", "ここでお知らせ")
+                || (containsAny(x, "2025年", "2026年", "2027年", "10月", "11月")
+                    && containsAny(x, "ライブ", "イベント", "公演", "会場", "発売", "シングル", "ツアー")))
+            return State.ANNOUNCEMENT;
+        if (containsAny(c, "ここで1曲", "ここで一曲", "聞いていただいたのは", "聞いていただいているのは")
+                || containsAny(shortTail, "ここで1曲お聞きください", "ここで一曲お聞きください"))
+            return State.SONG;
+        if (containsAny(c, "こちらのコーナー", "コーナーでした", "しおりん聞いてけれ", "秋田のしおり"))
+            return State.CORNER;
+        if (containsAny(mediumTail, "秋田のしおり")
+                && !containsAny(shortTail, "以上 秋田のしおりのコーナーでした", "以上秋田のしおりのコーナーでした"))
+            return State.CORNER;
+        if (containsAny(c, "ラジオネーム", "都 ラジオネーム", "県 ラジオネーム", "府 ラジオネーム",
+                "道 ラジオネーム") || recentRadioNameSlot(shortTail))
+            return State.MAIL;
+        return State.FREE_TALK;
+    }
+
+'''
+        q = replaceRange027b(q,
+                "    public static State detectState(String previousText, String candidate) {",
+                "    public static boolean looksSuspiciousText(State state, String text) {",
+                detectState, "state detector")
+
+        String suspiciousMethod = '''    private static String suspiciousReason(State state, String previous, String c,
+                                           double margin, float confidence) {
+        ArrayList<String> reasons = new ArrayList<>();
+        boolean highValue = state == State.COLD_OPEN || state == State.MAIL || state == State.SONG
+                || state == State.ANNOUNCEMENT || state == State.MAIL_INFO || state == State.ENDING;
+        if (confidence >= 0 && confidence < 0.76f) reasons.add("low_confidence");
+        if (margin < (highValue ? 0.10 : 0.065)) reasons.add("candidate_tie");
+        if (c.length() <= 2 && confidence >= 0 && confidence < 0.82f
+                && !containsAny(c, "はい", "ね", "あ", "え", "うん", "です")) reasons.add("tiny_fragment");
+        if (containsAny(c, "乗ってくるみ", "長田詩織", "中田詩織", "のて私より", "持っていこう しおり"))
+            reasons.add("known_bad_form");
+        if (state == State.COLD_OPEN && !containsAny(c, "永田詩央里", "ノットイコールミー")
+                && containsAny(c, "こんばんは", "今晩")) reasons.add("cold_open_identity");
+        if (state == State.SONG && containsAny(c, "はるかり", "ザモッツァ", "ミシェルガ エレファント", "修理は", "なので小さな恋"))
+            reasons.add("music_entity");
+        if (state == State.ANNOUNCEMENT && containsAny(c, "キアアリーナ", "県アリーナ", "ニコラブ", "にゃちゃん", "公園に関する詳細"))
+            reasons.add("announcement_entity");
+        if (state == State.ENDING && containsAny(c, "聞いてけです", "ポケモン 聞いて", "持っていこう", "中田 修理"))
+            reasons.add("ending_mismatch");
+        if (highValue && margin < 0.08 && c.matches(".*[一-龠々]$") && c.length() >= 8)
+            reasons.add("clipped_kanji_end");
+        return join(reasons, ",");
+    }
+
+'''
+        q = replaceRange027b(q,
+                "    private static String suspiciousReason(State state, String previous, String c,",
+                "    private static boolean recentRadioNameSlot(String tail) {",
+                suspiciousMethod, "suspicion detector")
+        decisionFile.write(q, "UTF-8")
+
+        File rrFile = file("src/main/java/com/example/radikotranscriber/SelectiveRerecognitionEngineV026.java")
+        String r = rrFile.getText("UTF-8")
+        r = r.replace("selective-rerecognition-v026-2026-09-06", "selective-rerecognition-v027-2026-09-06")
+        r = r.replace("private static final int MAX_ATTEMPTS = 3;", "private static final int MAX_ATTEMPTS = 4;")
+        r = r.replace("private static final long PAD_MS = 550L;", "private static final long PAD_MS = 780L;")
+        r = r.replace("private static final double FEED_RATE = 1.28;", "private static final double FEED_RATE = 1.05;")
+        r = r.replace("main.postDelayed(timeout, 17000L);", "main.postDelayed(timeout, 21000L);")
+
+        String oldListener = '''                @Override public void onError(int error) { finishOne(s, null, "error_" + error); }
+                @Override public void onResults(Bundle results) { finishOne(s, results, "results"); }
+                @Override public void onPartialResults(Bundle partialResults) {}
+                @Override public void onEvent(int eventType, Bundle params) {}
+                @Override public void onSegmentResults(Bundle segmentResults) { finishOne(s, segmentResults, "segment"); }'''
+        if (!r.contains(oldListener)) throw new GradleException("v0.27b: rerecognition listener missing")
+        r = r.replace(oldListener, '''                @Override public void onError(int error) { finishOne(s, null, "error_" + error); }
+                @Override public void onResults(Bundle results) {
+                    if (hasUsableResults(results)) finishOne(s, results, "results");
+                    else finishOne(s, null, "results_empty");
+                }
+                @Override public void onPartialResults(Bundle partialResults) {}
+                @Override public void onEvent(int eventType, Bundle params) {}
+                @Override public void onSegmentResults(Bundle segmentResults) {
+                    if (hasUsableResults(segmentResults)) finishOne(s, segmentResults, "segment");
+                    else if (logger != null) logger.log("rerecognition_segment_ignored",
+                            "segmentId=" + s.segmentId + ";reason=no_usable_results");
+                }''')
+
+        String feedMarker = '''        void feedRange(final Suspect s) {
+'''
+        if (!r.contains("boolean hasUsableResults(Bundle results)")) {
+            if (!r.contains(feedMarker)) throw new GradleException("v0.27b: feed marker missing")
+            r = r.replace(feedMarker, '''        boolean hasUsableResults(Bundle results) {
+            if (results == null) return false;
+            ArrayList<String> xs = results.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION);
+            if (xs == null || xs.isEmpty()) return false;
+            for (String x : xs) if (x != null && !x.trim().isEmpty()) return true;
+            return false;
+        }
+
+        void feedRange(final Suspect s) {
+''')
+        }
+
+        String oldRange = '''                long rawStartMs = Math.max(0L, Math.round((s.startMs - mediaStartMs) / playbackSpeed) - PAD_MS);
+                long rawEndMs = Math.max(rawStartMs + 400L,
+                        Math.round((s.endMs - mediaStartMs) / playbackSpeed) + PAD_MS);'''
+        if (!r.contains(oldRange)) throw new GradleException("v0.27b: rerecognition range missing")
+        r = r.replace(oldRange, '''                long pad = PAD_MS;
+                if (s.state == KerekereCandidateDecisionEngine.State.COLD_OPEN
+                        || s.state == KerekereCandidateDecisionEngine.State.SONG
+                        || s.state == KerekereCandidateDecisionEngine.State.ANNOUNCEMENT
+                        || s.state == KerekereCandidateDecisionEngine.State.ENDING) pad = 1100L;
+                long rawStartMs = Math.max(0L, Math.round((s.startMs - mediaStartMs) / playbackSpeed) - pad);
+                long rawEndMs = Math.max(rawStartMs + 600L,
+                        Math.round((s.endMs - mediaStartMs) / playbackSpeed) + pad);''')
+        rrFile.write(r, "UTF-8")
+
+        File onlineFile = file("src/main/java/com/example/radikotranscriber/OnlineEntityVerifierV4.java")
+        String o = onlineFile.getText("UTF-8")
+        o = o.replace("online-entity-verifier-v025-2026-09-06", "online-entity-verifier-v027-2026-09-06")
+        String oldVerified = '''                verified = titleOk || artistOk || (pair.title.equals(hit.title) && pair.artist.equals(hit.artist));'''
+        if (o.contains(oldVerified)) {
+            o = o.replace(oldVerified, '''                boolean exactBoth = normalize(pair.title).equals(normalize(hit.title))
+                        && normalize(pair.artist).equals(normalize(hit.artist));
+                verified = exactBoth || (titleOk && artistOk)
+                        || (combined >= 0.84 && artistOk && hit.titleSimilarity >= 0.82);''')
+        }
+        onlineFile.write(o, "UTF-8")
+
+        File titleFile = file("src/main/java/com/example/radikotranscriber/OnlineMusicTitleFallbackV026.java")
+        String t = titleFile.getText("UTF-8")
+        t = t.replace("online-music-title-fallback-v026-2026-09-06", "online-music-title-fallback-v027-2026-09-06")
+        if (!t.contains("if (!KerekereObservedCorrectionsV027.isStrongMusicCue(segment)) return;")) {
+            String observeMarker = '''    public static void observe(String currentProgram, String segment, Logger diagnosticLogger) {
+'''
+            if (!t.contains(observeMarker)) throw new GradleException("v0.27b: title observe missing")
+            t = t.replace(observeMarker, '''    public static void observe(String currentProgram, String segment, Logger diagnosticLogger) {
+        if (!KerekereObservedCorrectionsV027.isStrongMusicCue(segment)) return;
+''')
+        }
+        t = t.replace('''        String bad = "ありがとうございます|この番組|ラジオネーム|皆さん|耳なじみ|初めて聞く";''',
+                '''        String bad = "ありがとうございます|この番組|ラジオネーム|皆さん|耳なじみ|初めて聞く|コーナー|エンディング|最後まで|お相手|番組公式|お知らせ|闇夜|提灯";''')
+        titleFile.write(t, "UTF-8")
+
+        File episodeFile = file("src/main/java/com/example/radikotranscriber/EpisodeStore.java")
+        String e = episodeFile.getText("UTF-8")
+        String biasMethod = '''    public ArrayList<String> getBiasStrings(String program, String title) {
+        LinkedHashSet<String> set = new LinkedHashSet<>();
+        for (String term : KerekereFixedTemplate.biasTerms(program)) {
+            if (set.size() >= 10) break;
+            set.add(term);
+        }
+        if (KerekereContextProfile.applies(program)) {
+            set.add("ななお");
+            set.add("ガンバレないわ");
+            set.add("しゃかかな");
+            set.add("HALCALI");
+            set.add("今日の私はキゲンがいい");
+            set.add("THE MODS");
+            set.add("ごきげんRADIO");
+        }
+        for (String term : KerekereObservedCorrectionsV027.biasTerms(program)) {
+            if (set.size() >= 29) break;
+            set.add(term);
+        }
+        for (String term : KerekereFutureScheduleContext.biasTerms(program)) {
+            if (set.size() >= 38) break;
+            set.add(term);
+        }
+        for (String term : KerekereOfficialKnowledge.biasTerms(program)) {
+            if (set.size() >= 44) break;
+            set.add(term);
+        }
+        for (String term : KerekereVerifiedLexicon.biasTerms(program)) {
+            if (set.size() >= 47) break;
+            set.add(term);
+        }
+        for (String term : KerekereProgramStructure.biasTerms(program, title)) {
+            if (set.size() >= 49) break;
+            set.add(term);
+        }
+        for (String term : KerekereContextProfile.biasTerms(program)) {
+            if (set.size() >= 50) break;
+            set.add(term);
+        }
+        if (set.size() < 50) addUsefulBias(set, safe(title));
+        ArrayList<String> out = new ArrayList<>(set);
+        return out.size() <= 50 ? out : new ArrayList<>(out.subList(0, 50));
+    }
+
+'''
+        e = replaceRange027b(e,
+                "    public ArrayList<String> getBiasStrings(String program, String title) {",
+                "    private void addUsefulBias(LinkedHashSet<String> set, String s) {",
+                biasMethod, "bias strings")
+        episodeFile.write(e, "UTF-8")
+
+        File diagnosticFile = file("src/main/java/com/example/radikotranscriber/DiagnosticStore.java")
+        String d = diagnosticFile.getText("UTF-8")
+        d = d.replace("radiko-transcriber-diagnostics-v11", "radiko-transcriber-diagnostics-v12")
+        if (!d.contains("observedCorrectionsV027")) {
+            String diagMarker = '''                o.put("musicTitleFallbackV026", OnlineMusicTitleFallbackV026.VERSION);'''
+            if (!d.contains(diagMarker)) throw new GradleException("v0.27b: diagnostic marker missing")
+            d = d.replace(diagMarker, '''                o.put("musicTitleFallbackV026", OnlineMusicTitleFallbackV026.VERSION);
+                o.put("observedCorrectionsV027", KerekereObservedCorrectionsV027.VERSION);
+                o.put("finalProofreaderV027", TranscriptFinalProofreaderV027.VERSION);
+                o.put("resumeTimelineV027", "session-media-base-v027");
+                o.put("searchGateV027", "explicit-music-cue-only-v027");''')
+        }
+        diagnosticFile.write(d, "UTF-8")
+
+        File layout = file("src/main/res/layout/activity_main.xml")
+        String x = layout.getText("UTF-8")
+        x = x.replace("v0.26", "v0.27")
+        x = x.replace("怪しい箇所だけ再認識 / 番組状態+未来予定 / 全文自動校閲 / 安定認識",
+                "再認識安定化 / 再開位置修正 / 局所重複除去 / 検索厳格化")
+        layout.write(x, "UTF-8")
+    }
+}
