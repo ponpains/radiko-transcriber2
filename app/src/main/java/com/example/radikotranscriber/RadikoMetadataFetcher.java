@@ -16,8 +16,9 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * Reads only the normal public radiko web page and extracts display metadata.
- * No stream URL/token/API reverse engineering is used here.
+ * Reads only the normal public radiko web page and extracts display/recognition metadata.
+ * No stream URL/token/private API extraction is used here. Public HTML and text embedded in that
+ * same page are used only as language hints for the recognizer.
  */
 public final class RadikoMetadataFetcher {
     private static final ExecutorService EXECUTOR = Executors.newSingleThreadExecutor();
@@ -103,14 +104,12 @@ public final class RadikoMetadataFetcher {
             String twitterTitle = firstMeta(html, "twitter:title");
             String titleTag = first(html, Pattern.compile("(?is)<title[^>]*>(.*?)</title>"), 1);
             String ogDescription = firstMeta(html, "og:description");
-            String description = !ogDescription.isEmpty() ? ogDescription
-                    : firstMeta(html, "description");
+            String metaDescription = !ogDescription.isEmpty() ? ogDescription : firstMeta(html, "description");
 
             ogTitle = cleanHtmlText(ogTitle);
             twitterTitle = cleanHtmlText(twitterTitle);
             titleTag = cleanHtmlText(titleTag);
-            description = cleanHtmlText(description);
-            r.description = description;
+            metaDescription = cleanHtmlText(metaDescription);
 
             String visible = html
                     .replaceAll("(?is)<script[^>]*>.*?</script>", " ")
@@ -119,10 +118,14 @@ public final class RadikoMetadataFetcher {
             visible = cleanHtmlText(visible);
             if (visible.length() > 120000) visible = visible.substring(0, 120000);
 
-            String combined = joinNonEmpty(ogTitle, twitterTitle, titleTag, description, visible);
+            String combined = joinNonEmpty(ogTitle, twitterTitle, titleTag, metaDescription, visible);
             extractEpisodeIdentity(combined, r);
             extractDate(combined, r);
             extractProgram(combined, r);
+
+            String embedded = bestEmbeddedDescription(html, r.episodeTitle);
+            String nearby = visibleContext(visible, r.episodeTitle);
+            r.description = compactContext(joinNonEmpty(r.episodeTitle, metaDescription, embedded, nearby), 1200);
 
             if (!r.hasEpisodeIdentity()) {
                 r.error = "放送回・タイトルをページから判別できませんでした";
@@ -136,7 +139,6 @@ public final class RadikoMetadataFetcher {
     }
 
     private static void extractEpisodeIdentity(String text, Result r) {
-        // Current radiko podcast pages use forms such as #58「家に喫茶店を作ります」.
         Pattern quoted = Pattern.compile("[＃#]\\s*(\\d{1,4})\\s*[「『\\\"]\\s*([^」』\\\"\\r\\n]{1,100})\\s*[」』\\\"]");
         Matcher m = quoted.matcher(text);
         if (m.find()) {
@@ -149,7 +151,6 @@ public final class RadikoMetadataFetcher {
         m = number.matcher(text);
         if (m.find()) r.episodeNumber = "#" + m.group(1);
 
-        // Fallback for pages where the number and quoted title are separated by tags.
         Pattern titleOnly = Pattern.compile("[「『\\\"]\\s*([^」』\\\"\\r\\n]{2,100})\\s*[」』\\\"]");
         m = titleOnly.matcher(text);
         if (m.find()) r.episodeTitle = cleanupTitle(m.group(1));
@@ -175,6 +176,75 @@ public final class RadikoMetadataFetcher {
                 || (compact.contains("永田詩央里") && compact.contains("けれけれ"))) {
             r.program = "≠ME 永田詩央里のけれけれ";
         }
+    }
+
+    /** Pull useful human-readable text from JSON/JSON-LD already embedded in the public page. */
+    private static String bestEmbeddedDescription(String html, String episodeTitle) {
+        Pattern p = Pattern.compile("(?is)\\\"(?:description|summary|episodeDescription)\\\"\\s*:\\s*\\\"((?:\\\\.|[^\\\"\\\\]){20,1800})\\\"");
+        Matcher m = p.matcher(html);
+        String best = "";
+        int bestScore = Integer.MIN_VALUE;
+        int checked = 0;
+        while (m.find() && checked++ < 80) {
+            String x = decodeJsonString(m.group(1));
+            x = cleanHtmlText(x);
+            if (x.length() < 20 || x.length() > 1800) continue;
+            int score = japaneseCount(x);
+            if (!safe(episodeTitle).isEmpty() && x.contains(episodeTitle)) score += 60;
+            if (containsAny(x, "今回", "ラジオネーム", "しおりん", "永田詩央里", "秋田")) score += 25;
+            if (containsAny(x, "radikoなら", "ラジオが聴ける", "ログイン", "会員登録")) score -= 80;
+            if (score > bestScore) { bestScore = score; best = x; }
+        }
+        return bestScore >= 25 ? best : "";
+    }
+
+    private static String visibleContext(String visible, String episodeTitle) {
+        String v = safe(visible);
+        String title = safe(episodeTitle).trim();
+        if (v.isEmpty() || title.isEmpty()) return "";
+        int i = v.indexOf(title);
+        if (i < 0) return "";
+        int from = Math.max(0, i - 180);
+        int to = Math.min(v.length(), i + title.length() + 760);
+        String x = cleanHtmlText(v.substring(from, to));
+        return japaneseCount(x) >= 20 ? x : "";
+    }
+
+    private static String decodeJsonString(String s) {
+        String x = safe(s);
+        x = x.replace("\\n", " ").replace("\\r", " ").replace("\\t", " ")
+                .replace("\\\"", "\"").replace("\\/", "/");
+        Matcher u = Pattern.compile("\\\\u([0-9a-fA-F]{4})").matcher(x);
+        StringBuffer b = new StringBuffer();
+        while (u.find()) {
+            try {
+                char c = (char)Integer.parseInt(u.group(1), 16);
+                u.appendReplacement(b, Matcher.quoteReplacement(String.valueOf(c)));
+            } catch (Exception ignored) {}
+        }
+        u.appendTail(b);
+        return b.toString().replace("\\\\", "\\");
+    }
+
+    private static int japaneseCount(String s) {
+        int n = 0;
+        for (int i = 0; i < safe(s).length(); i++) {
+            char c = s.charAt(i);
+            if ((c >= '\u3040' && c <= '\u30ff') || (c >= '\u3400' && c <= '\u9fff')) n++;
+        }
+        return n;
+    }
+
+    private static String compactContext(String s, int max) {
+        String x = cleanHtmlText(s);
+        if (x.length() <= max) return x;
+        return x.substring(0, max).trim();
+    }
+
+    private static boolean containsAny(String s, String... terms) {
+        String x = safe(s);
+        for (String t : terms) if (x.contains(t)) return true;
+        return false;
     }
 
     private static String firstMeta(String html, String name) {
