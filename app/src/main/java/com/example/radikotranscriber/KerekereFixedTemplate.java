@@ -5,12 +5,12 @@ import java.util.ArrayList;
 /**
  * Stable fixed-wording templates for ≠ME 永田詩央里のけれけれ.
  *
- * This is intentionally narrow.  It is not a generic rewrite engine: the opening is restored only
- * at the beginning of a kerekere transcript when many independent anchors are present, and the
- * closing is restored only around the explicit "ここまでのお相手" / "来週も" sign-off.
+ * v0.23 also supports episodes that have a short pre-opening/cold-open before the normal title and
+ * fixed introduction.  We only replace a block when many independent anchors match, so ordinary
+ * talk later in the show is left untouched.
  */
 public final class KerekereFixedTemplate {
-    public static final String VERSION = "kerekere-fixed-template-v022-2026-09-06";
+    public static final String VERSION = "kerekere-fixed-template-v023-2026-09-06";
 
     public static final String OPENING_TITLE = "ノットイコールミー永田詩央里のけれけれ";
     public static final String OPENING_1 = "この番組はアイドルグループ ノットイコールミーの永田詩央里が パーソナリティを務めるラジオ番組 けれけれです。";
@@ -42,7 +42,7 @@ public final class KerekereFixedTemplate {
         return out;
     }
 
-    /** Corrects a single live recognition result while preserving any episode-specific tail. */
+    /** Correct one live result while preserving episode-specific talk before/after it. */
     public static String refineSegment(String program, String previousText, String segment) {
         String s = safe(segment).trim();
         if (!KerekereContextProfile.applies(program) || s.isEmpty()) return s;
@@ -50,8 +50,8 @@ public final class KerekereFixedTemplate {
         if (isOpeningCandidate(previousText, s)) {
             int end = openingEnd(s);
             if (end > 0) {
-                String tail = s.substring(end).trim();
-                s = OPENING_INLINE + (tail.isEmpty() ? "" : " " + trimLeadingPunctuation(tail));
+                String tail = trimLeadingPunctuation(s.substring(end).trim());
+                s = OPENING_INLINE + (tail.isEmpty() ? "" : " " + tail);
             }
         }
 
@@ -59,28 +59,24 @@ public final class KerekereFixedTemplate {
         return s.replaceAll("[ \\t]{2,}", " ").trim();
     }
 
-    /** Final-pass form.  This guarantees the stable wording even if the opening crossed segments. */
+    /** Final pass: replace the fixed block even when a cold-open happened before it. */
     public static String refineTranscript(String program, String transcript) {
         String s = safe(transcript).replace("\r\n", "\n").replace('\r', '\n').trim();
         if (!KerekereContextProfile.applies(program) || s.isEmpty()) return s;
 
-        int searchEnd = Math.min(s.length(), 900);
-        String head = s.substring(0, searchEnd);
-        if (isOpeningCandidate("", head)) {
-            int end = openingEnd(head);
-            if (end > 0) {
-                String tail = s.substring(end).trim();
-                tail = trimLeadingPunctuation(tail);
-                s = OPENING_BLOCK + (tail.isEmpty() ? "" : "\n" + tail);
-            }
+        OpeningWindow window = findOpeningWindow(s);
+        if (window != null) {
+            String before = s.substring(0, window.start).replaceAll("[ \\t]+$", "").replaceAll("\\n+$", "");
+            String after = window.end < s.length() ? trimLeadingPunctuation(s.substring(window.end).trim()) : "";
+            s = before + (before.isEmpty() ? "" : "\n") + OPENING_BLOCK
+                    + (after.isEmpty() ? "" : "\n" + after);
         }
 
         int signoff = lastIndexOfAny(s, new String[]{"ここまでのお相手", "ここまでのおあいて"});
         if (signoff >= 0) {
             int next = indexOfAny(s, signoff, new String[]{"来週も", "来週 も"});
-            if (next >= 0 && next - signoff < 220) {
+            if (next >= 0 && next - signoff < 240) {
                 int end = sentenceEndAfter(s, next);
-                if (end < next) end = s.length();
                 String before = s.substring(0, signoff).replaceAll("[ \\t]+$", "").replaceAll("\\n+$", "");
                 String after = end < s.length() ? s.substring(end).trim() : "";
                 String fixed = ENDING_1 + "\n" + ENDING_2;
@@ -92,12 +88,55 @@ public final class KerekereFixedTemplate {
         return s.replaceAll("\\n{3,}", "\n\n").trim();
     }
 
+    private static OpeningWindow findOpeningWindow(String s) {
+        int max = Math.min(s.length(), 3600);
+        String head = s.substring(0, max);
+
+        // The fixed description is the strongest anchor.  It can occur after a cold-open, as in
+        // diagnostic #11 where the normal intro began after the radio-cat discussion.
+        int desc = head.indexOf("この番組は");
+        while (desc >= 0) {
+            int probeEnd = Math.min(head.length(), desc + 950);
+            String probe = head.substring(desc, probeEnd);
+            if (openingAnchorScore(probe) >= 7) {
+                int endRel = openingEnd(probe);
+                if (endRel > 0) {
+                    int start = titleBlockStart(head, desc);
+                    return new OpeningWindow(start, desc + endRel);
+                }
+            }
+            desc = head.indexOf("この番組は", desc + 5);
+        }
+        return null;
+    }
+
+    private static int titleBlockStart(String head, int descriptionPos) {
+        // If "それではそろそろ始めて…" exists shortly before the description, preserve that
+        // sentence and replace from the following line/title fragment.  Otherwise replace from the
+        // nearest preceding line that looks like a mangled program-title fragment.
+        int cue = Math.max(head.lastIndexOf("それではそろそろ始め", descriptionPos),
+                head.lastIndexOf("そろそろ始め", descriptionPos));
+        if (cue >= 0 && descriptionPos - cue < 500) {
+            int nl = head.indexOf('\n', cue);
+            if (nl >= 0 && nl < descriptionPos) return skipWhitespace(head, nl + 1);
+        }
+
+        int line = head.lastIndexOf('\n', Math.max(0, descriptionPos - 1));
+        if (line >= 0 && descriptionPos - line < 120) return skipWhitespace(head, line + 1);
+        return descriptionPos;
+    }
+
     private static boolean isOpeningCandidate(String previousText, String current) {
-        String prev = compact(safe(previousText));
-        // Opening may be the first recognizer segment or may spill into the second one.  Do not
-        // rewrite once a real body of the episode already exists.
-        if (prev.length() > 450) return false;
-        String x = compact(safe(previousText) + " " + safe(current));
+        String prev = safe(previousText);
+        String recent = tail(prev, 700);
+        boolean earlyEnough = compact(prev).length() <= 3000;
+        boolean cueNearby = containsAny(recent, "それではそろそろ始め", "そろそろ始めて", "そろそろ始めて行きましょう");
+        if (!earlyEnough && !cueNearby) return false;
+        return openingAnchorScore(safe(current)) >= 7;
+    }
+
+    private static int openingAnchorScore(String source) {
+        String x = compact(source);
         int score = 0;
         if (containsAny(x, "この番組", "ラジオ番組")) score++;
         if (x.contains("アイドルグループ")) score++;
@@ -110,7 +149,7 @@ public final class KerekereFixedTemplate {
         if (x.contains("番組の感想")) score++;
         if (x.contains("ハッシュタグ")) score++;
         if (containsAny(x, "投稿してください", "投稿して下さい")) score++;
-        return score >= 7;
+        return score;
     }
 
     private static int openingEnd(String s) {
@@ -158,6 +197,12 @@ public final class KerekereFixedTemplate {
         return s.length();
     }
 
+    private static int skipWhitespace(String s, int i) {
+        int p = Math.max(0, i);
+        while (p < s.length() && Character.isWhitespace(s.charAt(p))) p++;
+        return p;
+    }
+
     private static int indexOfAny(String s, int from, String[] values) {
         int best = -1;
         for (String v : values) {
@@ -186,5 +231,15 @@ public final class KerekereFixedTemplate {
         return safe(s).replaceAll("[\\s、。！？!?，,.・：；『』「」()（）]+", "");
     }
 
+    private static String tail(String s, int max) {
+        String x = safe(s);
+        return x.length() <= max ? x : x.substring(x.length() - max);
+    }
+
     private static String safe(String s) { return s == null ? "" : s; }
+
+    private static final class OpeningWindow {
+        final int start, end;
+        OpeningWindow(int start, int end) { this.start = start; this.end = end; }
+    }
 }
