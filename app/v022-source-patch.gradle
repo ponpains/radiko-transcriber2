@@ -1,0 +1,136 @@
+// v0.22: stability-first precision layer.
+// Keep v0.21's checkpoint-flush transport unchanged. Add only fail-open background entity
+// verification, fixed show templates, verified proper-noun scoring and a final idempotent text pass.
+
+def replaceRange022 = { String text, String startMarker, String endMarker, String replacement, String label ->
+    int a = text.indexOf(startMarker)
+    if (a < 0) throw new GradleException("v0.22 patch: start marker not found: " + label)
+    int b = text.indexOf(endMarker, a)
+    if (b < 0) throw new GradleException("v0.22 patch: end marker not found: " + label)
+    return text.substring(0, a) + replacement + text.substring(b)
+}
+
+tasks.named("preBuild").configure {
+    doLast {
+        File serviceFile = file("src/main/java/com/example/radikotranscriber/TranscribeService.java")
+        String s = serviceFile.getText("UTF-8")
+
+        // Start the resolver only after the public radiko episode context has been appended. It is
+        // explicitly disabled for microphone mode so personal microphone audio is never queried.
+        if (!s.contains("OnlineEntityVerifier.beginEpisode")) {
+            s = s.replace(
+                    "            appendEpisodePageContext(intent);",
+                    "            appendEpisodePageContext(intent);\n" +
+                    "            OnlineEntityVerifier.beginEpisode(this, program,\n" +
+                    "                    episodeTitle + \" \" + episodeHints, \"internal\".equals(mode),\n" +
+                    "                    (kind, detail) -> diag(kind, detail));")
+        }
+
+        // Give verified spellings a measured candidate-scoring advantage. Online aliases only enter
+        // here after a high-confidence background verification, so network failure cannot hurt ASR.
+        if (!s.contains("KerekereVerifiedLexicon.scoreCandidate")) {
+            s = s.replace(
+                    "            score += KerekereProgramStructure.scoreCandidate(program, c, finalText,\n                    episodeTitle + \" \" + episodeHints);",
+                    "            score += KerekereProgramStructure.scoreCandidate(program, c, finalText,\n" +
+                    "                    episodeTitle + \" \" + episodeHints);\n" +
+                    "            score += KerekereVerifiedLexicon.scoreCandidate(program, c, finalText);\n" +
+                    "            score += OnlineEntityVerifier.scoreCandidate(program, c);")
+        }
+
+        // Observe only selected recognizer chunks. This method queues work and returns immediately;
+        // capture/feed threads never wait for HTTP.
+        if (!s.contains("OnlineEntityVerifier.observe(program, finalText")) {
+            s = s.replace(
+                    "    private void commitText(String rawSegment, String selected, String source) {\n        if (selected == null) return;",
+                    "    private void commitText(String rawSegment, String selected, String source) {\n" +
+                    "        if (selected == null) return;\n" +
+                    "        OnlineEntityVerifier.observe(program, finalText, selected,\n" +
+                    "                (kind, detail) -> diag(kind, detail));")
+        }
+
+        // Finish with one local, idempotent precision pass. It never waits for outstanding online
+        // work: mappings already verified during the episode are used, otherwise the text is kept.
+        if (!s.contains("v022_final_precision_pass")) {
+            s = s.replace(
+                    "    private void stopEverything(String message, String statusValue, String reason) {\n        if (running) flushPartialForRecovery();",
+                    "    private void stopEverything(String message, String statusValue, String reason) {\n" +
+                    "        if (running) flushPartialForRecovery();\n" +
+                    "        if (running && finalText != null && !finalText.trim().isEmpty()) {\n" +
+                    "            String beforePrecision = finalText;\n" +
+                    "            finalText = ContextCorrectionEngine.refineTranscript(program, finalText);\n" +
+                    "            if (!beforePrecision.equals(finalText))\n" +
+                    "                diag(\"v022_final_precision_pass\", \"beforeChars=\" + beforePrecision.length()\n" +
+                    "                        + \";afterChars=\" + finalText.length());\n" +
+                    "            diag(\"online_entity_stats\", OnlineEntityVerifier.stats());\n" +
+                    "        }")
+        }
+
+        serviceFile.write(s, "UTF-8")
+
+        File episodeFile = file("src/main/java/com/example/radikotranscriber/EpisodeStore.java")
+        String e = episodeFile.getText("UTF-8")
+        String biasMethod = '''    public ArrayList<String> getBiasStrings(String program, String title) {
+        LinkedHashSet<String> set = new LinkedHashSet<>();
+
+        // Fixed wording first.  These clauses recur every episode and are the user's largest source
+        // of pointless manual repair, so they must not be crowded out by learned one-off terms.
+        for (String term : KerekereFixedTemplate.biasTerms(program)) {
+            if (set.size() >= 14) break;
+            set.add(term);
+        }
+        for (String term : KerekereProgramStructure.biasTerms(program, title)) {
+            if (set.size() >= 28) break;
+            set.add(term);
+        }
+        for (String term : KerekereVerifiedLexicon.biasTerms(program)) {
+            if (set.size() >= 38) break;
+            set.add(term);
+        }
+        for (String term : KerekereContextBoost.biasTerms(program)) {
+            if (set.size() >= 44) break;
+            set.add(term);
+        }
+        for (String term : KerekereContextProfile.biasTerms(program)) {
+            if (set.size() >= 48) break;
+            set.add(term);
+        }
+        if (set.size() < 50) addUsefulBias(set, safe(title));
+        if (set.size() < 50) addUsefulBias(set, safe(program));
+        for (Correction r : getCorrections(program)) {
+            if (set.size() >= 50) break;
+            String corrected = normalizeLexical(r.correct);
+            if (corrected.length() >= 2 && corrected.length() <= 30) set.add(corrected);
+        }
+        ArrayList<String> out = new ArrayList<>(set);
+        return out.size() <= 50 ? out : new ArrayList<>(out.subList(0, 50));
+    }
+
+'''
+        e = replaceRange022(e,
+                "    public ArrayList<String> getBiasStrings(String program, String title) {",
+                "    private void addUsefulBias(LinkedHashSet<String> set, String s) {",
+                biasMethod,
+                "v0.22 prioritized bias strings")
+        episodeFile.write(e, "UTF-8")
+
+        File diagnosticFile = file("src/main/java/com/example/radikotranscriber/DiagnosticStore.java")
+        String d = diagnosticFile.getText("UTF-8")
+        d = d.replace("radiko-transcriber-diagnostics-v6", "radiko-transcriber-diagnostics-v7")
+        if (!d.contains("onlineEntityVerifier")) {
+            d = d.replace(
+                    "                o.put(\"recognitionTransport\", \"checkpoint-flush-v021\");",
+                    "                o.put(\"recognitionTransport\", \"checkpoint-flush-v021\");\n" +
+                    "                o.put(\"fixedTemplate\", KerekereFixedTemplate.VERSION);\n" +
+                    "                o.put(\"verifiedLexicon\", KerekereVerifiedLexicon.VERSION);\n" +
+                    "                o.put(\"onlineEntityVerifier\", OnlineEntityVerifier.VERSION);")
+        }
+        diagnosticFile.write(d, "UTF-8")
+
+        File layout = file("src/main/res/layout/activity_main.xml")
+        String x = layout.getText("UTF-8")
+        x = x.replace("v0.21", "v0.22")
+        x = x.replace("未確定音声保護 / 文脈認識強化 / 一文一行 / 固有名詞強化",
+                "定型文保証 / オンライン固有名詞照合 / 未確定音声保護 / 一文一行")
+        layout.write(x, "UTF-8")
+    }
+}
