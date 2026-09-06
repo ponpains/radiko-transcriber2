@@ -1,0 +1,9 @@
+// Small compile-safe cleanup after the v0.26 generated source integration.
+tasks.named("preBuild").configure {
+    doLast {
+        File serviceFile = file("src/main/java/com/example/radikotranscriber/TranscribeService.java")
+        String s = serviceFile.getText("UTF-8")
+        s = s.replace("rerecognitionV026.run(this, spoolFile,", "rerecognitionV026.run(TranscribeService.this, spoolFile,")
+        serviceFile.write(s, "UTF-8")
+    }
+}
