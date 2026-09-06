@@ -14,10 +14,16 @@ public final class ContextCorrectionEngine {
         String s = safe(segment);
         if (s.isEmpty()) return s;
 
-        // Program-specific context always runs before generic Japanese homophones.
+        // Program-specific context always runs before generic Japanese homophones.  The fixed
+        // template is narrow enough to guarantee recurring wording without turning normal speech
+        // into a canned script.  Online aliases are applied only after a high-confidence verifier
+        // has already approved them on a background thread.
         s = KerekereContextProfile.refine(program, previousText, s);
         s = KerekereContextBoost.refine(program, previousText, s);
         s = KerekereProgramStructure.refine(program, previousText, s);
+        s = KerekereVerifiedLexicon.refine(program, previousText, s);
+        s = KerekereFixedTemplate.refineSegment(program, previousText, s);
+        s = OnlineEntityVerifier.refineKnown(program, s);
         String context = tail(previousText, 420) + " " + s;
 
         if (containsAny(context, "ツアー", "ライブ", "ステージ", "チケット", "体育館", "アリーナ")) {
@@ -43,7 +49,7 @@ public final class ContextCorrectionEngine {
 
     /**
      * Applies context correction to a finished transcript and performs a second fuzzy cumulative
-     * duplicate pass. This is a safety net; the primary dedupe now happens before commit.
+     * duplicate pass. This is a safety net; the primary dedupe happens before commit.
      */
     public static String refineTranscript(String program, String text) {
         String src = safe(text).replace("\r\n", "\n").replace('\r','\n');
@@ -72,7 +78,13 @@ public final class ContextCorrectionEngine {
                 out.append(pOut);
             }
         }
-        return out.toString().replaceAll("\\n{3,}", "\n\n").trim();
+        String result = out.toString().replaceAll("\\n{3,}", "\n\n").trim();
+        result = repairCrossSegmentFragments(result);
+        result = OnlineEntityVerifier.refineKnown(program, result);
+        // Run the exact fixed wording last so the generic sentence formatter cannot add a full stop
+        // to the title or split the known opening in the wrong place.
+        result = KerekereFixedTemplate.refineTranscript(program, result);
+        return result.trim();
     }
 
     /** Updates only the final transcript and corrected segment text; raw/auto remain auditable. */
@@ -120,6 +132,19 @@ public final class ContextCorrectionEngine {
     public static String brief(String s) {
         String x = safe(s).replace('\n',' ').replace('\r',' ');
         return x.length() <= 140 ? x : x.substring(0, 140) + "…";
+    }
+
+    private static String repairCrossSegmentFragments(String text) {
+        String s = safe(text).replace("\r\n", "\n").replace('\r','\n');
+        // Only repair highly characteristic recognizer-boundary fractures.  Do not globally merge
+        // short lines: the user intentionally wants fine one-sentence-per-line formatting.
+        s = s.replaceAll("(?m)詳しく[。]?[ \\t]*\\n+[ \\t]*は(?=番組|公式|こちら|サイト|ホームページ)", "詳しくは");
+        s = s.replaceAll("(?m)とのこと[。]?[ \\t]*\\n+[ \\t]*で(?=早速|続いて|では|すぐ)", "とのことで");
+        s = s.replaceAll("(?m)([0-9０-９]+)[。][ \\t]*\\n+[ \\t]*年目", "$1年目");
+        s = s.replaceAll("(?m)ヘ[ \\t]*\\n+[ \\t]*ッドフォン", "ヘッドフォン");
+        s = s.replaceAll("(?m)([0-9０-９]+つ)お[。][ \\t]*\\n+[ \\t]*知らせ", "$1お知らせ");
+        s = s.replace("ありがとうございますはい", "ありがとうございます。\nはい");
+        return s.replaceAll("\\n{3,}", "\n\n").trim();
     }
 
     private static String replaceBounded(String s, String wrong, String correct, String[] hints) {
