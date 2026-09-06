@@ -1,0 +1,213 @@
+// v0.21: preserve unconfirmed speech across planned recognizer rotation, keep replay paced,
+// rebalance bias terms, and expose the transport revision in diagnostics.
+
+def replaceRange021 = { String text, String startMarker, String endMarker, String replacement, String label ->
+    int a = text.indexOf(startMarker)
+    if (a < 0) throw new GradleException("v0.21 patch: start marker not found: " + label)
+    int b = text.indexOf(endMarker, a)
+    if (b < 0) throw new GradleException("v0.21 patch: end marker not found: " + label)
+    return text.substring(0, a) + replacement + text.substring(b)
+}
+
+tasks.named("preBuild").configure {
+    doLast {
+        File serviceFile = file("src/main/java/com/example/radikotranscriber/TranscribeService.java")
+        String s = serviceFile.getText("UTF-8")
+
+        // v0.20 stopped burst replay, but its planned rotation rewound only the last few seconds.
+        // In the latest diagnostic safeOffset sometimes lagged feedOffset by tens of seconds, so
+        // unconfirmed audio could still be abandoned. v0.21 first closes the recognizer input and
+        // gives the current generation time to flush a final/segment result. Only after that grace
+        // period do we choose a replay point from the newest safe checkpoint.
+        s = s.replace("private static final double REPLAY_CATCHUP_RATE = 1.20;",
+                "private static final double REPLAY_CATCHUP_RATE = 1.55;")
+
+        if (!s.contains("plannedFlushFeedOffset")) {
+            s = s.replace(
+                    "    private volatile long feedDiagnosticEncodedBytes = 0L;\n",
+                    "    private volatile long feedDiagnosticEncodedBytes = 0L;\n" +
+                    "    private volatile long plannedFlushFeedOffset = 0L;\n" +
+                    "    private volatile long plannedFlushSafeOffset = 0L;\n" +
+                    "    private volatile int plannedFlushGeneration = -1;\n")
+            s = s.replace(
+                    "        feedDiagnosticEncodedBytes = 0L;\n        frozenDurationMs = 0L;",
+                    "        feedDiagnosticEncodedBytes = 0L;\n" +
+                    "        plannedFlushFeedOffset = 0L;\n" +
+                    "        plannedFlushSafeOffset = 0L;\n" +
+                    "        plannedFlushGeneration = -1;\n" +
+                    "        frozenDurationMs = 0L;")
+        }
+
+        String restartMethods = '''    private void requestRecognizerRestart(String statusText, long delayMs) {
+        requestRecognizerRestart(statusText, delayMs, false);
+    }
+
+    private void requestRecognizerRestart(String statusText, long delayMs, boolean planned) {
+        if (!running || restartScheduled || drainComplete) return;
+        restartScheduled = true;
+        plannedStopGeneration = recognizerGeneration;
+        final int generation = recognizerGeneration;
+        long effectiveDelay = delayMs;
+
+        if (planned) {
+            plannedRotationRequested = true;
+            currentRotationId++;
+            rotationReconnectCount = 0;
+            plannedFlushFeedOffset = feederReadOffset;
+            plannedFlushSafeOffset = safeCommittedOffset;
+            plannedFlushGeneration = generation;
+            recognizerReady = false;
+
+            long unconfirmedMs = Math.round(Math.max(0L, plannedFlushFeedOffset - plannedFlushSafeOffset)
+                    * 1000.0 / (SAMPLE_RATE * 2.0));
+            diag("planned_rotation_flush", "generation=" + generation
+                    + ";rotationId=" + currentRotationId
+                    + ";feedOffset=" + plannedFlushFeedOffset
+                    + ";safeOffset=" + plannedFlushSafeOffset
+                    + ";unconfirmedMs=" + unconfirmedMs);
+
+            // EOF is the cleanest way to ask a SpeechRecognizer using EXTRA_AUDIO_SOURCE to flush
+            // what it already received. Keep the recognizer/read side alive during the grace time.
+            closeRecognizerInputForFlush(generation);
+            effectiveDelay = Math.max(2800L, delayMs);
+        } else {
+            recognizerReady = false;
+            requestReplayFromSafe("session_boundary", generationHadResult ? 900L : 2200L);
+        }
+
+        diag("recognizer_restart_scheduled", "activeGeneration=" + recognizerGeneration
+                + ";planned=" + planned
+                + ";plannedStopGeneration=" + plannedStopGeneration
+                + ";delayMs=" + effectiveDelay
+                + ";feedOffset=" + feederReadOffset
+                + ";safeOffset=" + safeCommittedOffset
+                + ";replayOffset=" + requestedReplayOffset);
+        broadcast(statusText, true);
+
+        final long scheduledDelay = effectiveDelay;
+        mainHandler.postDelayed(() -> {
+            if (!running || drainComplete) return;
+            if (generation != recognizerGeneration) {
+                restartScheduled = false;
+                return;
+            }
+            if (planned && generation == plannedFlushGeneration) {
+                requestReplayFromCheckpoint("planned_rotation_checkpoint", REPLAY_RAW_MS,
+                        plannedFlushFeedOffset);
+            }
+            startRecognizerSession(true);
+        }, scheduledDelay);
+    }
+
+    private void closeRecognizerInputForFlush(int generation) {
+        if (generation != recognizerGeneration) return;
+        synchronized (pipeLock) {
+            OutputStream target = pipeOut;
+            pipeOut = null;
+            writeFd = null;
+            if (target != null) {
+                try { target.flush(); } catch (Exception ignored) {}
+                try { target.close(); } catch (Exception ignored) {}
+            }
+        }
+    }
+
+    private void requestReplayFromCheckpoint(String reason, long overlapMs, long feedAnchor) {
+        long overlap = Math.max(900L, Math.min(4200L, overlapMs));
+        long anchor = Math.max(0L, Math.min(feedAnchor, spoolBytesWritten));
+        long checkpoint = Math.max(0L, Math.min(safeCommittedOffset, anchor));
+        long base;
+        if (checkpoint > 0L) {
+            base = Math.max(0L, checkpoint - rawBytesForMs(overlap));
+        } else {
+            // If this generation produced no confirmed text at all, replay the complete unconfirmed
+            // interval up to one recognizer session rather than silently discarding it.
+            base = Math.max(0L, anchor - rawBytesForMs(70000L));
+        }
+        if (requestedReplayOffset < 0L || base < requestedReplayOffset) requestedReplayOffset = base;
+        long unconfirmedMs = Math.round(Math.max(0L, anchor - checkpoint)
+                * 1000.0 / (SAMPLE_RATE * 2.0));
+        diag("recognizer_checkpoint_replay_requested", "reason=" + reason
+                + ";activeGeneration=" + recognizerGeneration
+                + ";anchorOffset=" + anchor
+                + ";safeOffset=" + safeCommittedOffset
+                + ";unconfirmedMs=" + unconfirmedMs
+                + ";rollbackOffset=" + requestedReplayOffset
+                + ";overlapMs=" + overlap
+                + ";catchupRate=" + REPLAY_CATCHUP_RATE);
+    }
+
+'''
+        s = replaceRange021(s,
+                "    private void requestRecognizerRestart(String statusText, long delayMs) {",
+                "    private boolean hasUsableRecognition(Bundle b) {",
+                restartMethods,
+                "planned checkpoint flush restart")
+
+        // More N-best alternatives give the show/context scorer a better chance to select the right
+        // name or fixed phrase when the provider already has it as a lower-ranked hypothesis.
+        s = s.replace("ri.putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 8);",
+                "ri.putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 12);")
+
+        serviceFile.write(s, "UTF-8")
+
+        File episodeFile = file("src/main/java/com/example/radikotranscriber/EpisodeStore.java")
+        String e = episodeFile.getText("UTF-8")
+        String biasMethod = '''    public ArrayList<String> getBiasStrings(String program, String title) {
+        LinkedHashSet<String> set = new LinkedHashSet<>();
+
+        // 1) user/show structure first: important radio names, stable wording, and current episode.
+        for (String term : KerekereProgramStructure.biasTerms(program, title)) {
+            if (set.size() >= 32) break;
+            set.add(term);
+        }
+        if (set.size() < 35) addUsefulBias(set, safe(title));
+
+        // 2) diagnostic vocabulary that repeatedly appeared as difficult proper nouns.
+        for (String term : KerekereContextBoost.biasTerms(program)) {
+            if (set.size() >= 42) break;
+            set.add(term);
+        }
+
+        // 3) core show/corner/member vocabulary fills the remaining recognizer budget.
+        for (String term : KerekereContextProfile.biasTerms(program)) {
+            if (set.size() >= 50) break;
+            set.add(term);
+        }
+        if (set.size() < 50) addUsefulBias(set, safe(program));
+        for (Correction r : getCorrections(program)) {
+            if (set.size() >= 50) break;
+            String corrected = normalizeLexical(r.correct);
+            if (corrected.length() >= 2 && corrected.length() <= 30) set.add(corrected);
+        }
+        ArrayList<String> out = new ArrayList<>(set);
+        return out.size() <= 50 ? out : new ArrayList<>(out.subList(0, 50));
+    }
+
+'''
+        e = replaceRange021(e,
+                "    public ArrayList<String> getBiasStrings(String program, String title) {",
+                "    private void addUsefulBias(LinkedHashSet<String> set, String s) {",
+                biasMethod,
+                "balanced bias strings")
+        episodeFile.write(e, "UTF-8")
+
+        File diagnosticFile = file("src/main/java/com/example/radikotranscriber/DiagnosticStore.java")
+        String d = diagnosticFile.getText("UTF-8")
+        d = d.replace("radiko-transcriber-diagnostics-v5", "radiko-transcriber-diagnostics-v6")
+        if (!d.contains("checkpoint-flush-v021")) {
+            d = d.replace(
+                    "                o.put(\"programStructure\", KerekereProgramStructure.VERSION);",
+                    "                o.put(\"programStructure\", KerekereProgramStructure.VERSION);\n" +
+                    "                o.put(\"recognitionTransport\", \"checkpoint-flush-v021\");")
+        }
+        diagnosticFile.write(d, "UTF-8")
+
+        File layout = file("src/main/res/layout/activity_main.xml")
+        String x = layout.getText("UTF-8")
+        x = x.replace("v0.20", "v0.21")
+        x = x.replace("再送安定化 / 番組構造認識 / 一文一行 / 回ごと文脈",
+                "未確定音声保護 / 文脈認識強化 / 一文一行 / 固有名詞強化")
+        layout.write(x, "UTF-8")
+    }
+}
