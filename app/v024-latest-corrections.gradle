@@ -1,0 +1,34 @@
+// Small follow-up layer for corrections specific to the latest v0.23 diagnostic.
+tasks.named("preBuild").configure {
+    doLast {
+        File serviceFile = file("src/main/java/com/example/radikotranscriber/TranscribeService.java")
+        String s = serviceFile.getText("UTF-8")
+        if (!s.contains("KerekereObservedCorrectionsV024.scoreCandidate")) {
+            String marker = "            score += KerekereOfficialKnowledge.scoreCandidate(program, c, finalText);\n"
+            if (!s.contains(marker)) throw new GradleException("v0.24 latest: score marker missing")
+            s = s.replace(marker, marker
+                    + "            score += KerekereObservedCorrectionsV024.scoreCandidate(program, c, finalText);\n")
+        }
+        serviceFile.write(s, "UTF-8")
+
+        File contextFile = file("src/main/java/com/example/radikotranscriber/ContextCorrectionEngine.java")
+        String c = contextFile.getText("UTF-8")
+        if (!c.contains("KerekereObservedCorrectionsV024.refine")) {
+            String marker = "        s = KerekereOfficialKnowledge.refine(program, previousText, s);\n"
+            if (!c.contains(marker)) throw new GradleException("v0.24 latest: context marker missing")
+            c = c.replace(marker, marker
+                    + "        s = KerekereObservedCorrectionsV024.refine(program, previousText, s);\n")
+        }
+        contextFile.write(c, "UTF-8")
+
+        File diagnosticFile = file("src/main/java/com/example/radikotranscriber/DiagnosticStore.java")
+        String d = diagnosticFile.getText("UTF-8")
+        if (!d.contains("observedCorrectionsV024")) {
+            String marker = "                o.put(\"coldOpenTemplate\", KerekereFixedTemplate.VERSION);"
+            if (!d.contains(marker)) throw new GradleException("v0.24 latest: diagnostic marker missing")
+            d = d.replace(marker, marker + "\n"
+                    + "                o.put(\"observedCorrectionsV024\", KerekereObservedCorrectionsV024.VERSION);")
+        }
+        diagnosticFile.write(d, "UTF-8")
+    }
+}
