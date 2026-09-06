@@ -10,8 +10,8 @@ android {
         applicationId "com.ponpains.radikotranscriber"
         minSdk 33
         targetSdk 35
-        versionCode 25
-        versionName "0.25"
+        versionCode 26
+        versionName "0.26"
     }
 
     compileOptions {
@@ -54,3 +54,4 @@ apply from: 'v023-source-patch.gradle'
 apply from: 'v024-source-patch.gradle'
 apply from: 'v024-latest-corrections.gradle'
 apply from: 'v025-source-patch.gradle'
+apply from: 'v026-source-patch.gradle'
