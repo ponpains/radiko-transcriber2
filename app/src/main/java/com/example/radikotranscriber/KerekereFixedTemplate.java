@@ -5,18 +5,23 @@ import java.util.ArrayList;
 /**
  * Stable fixed-wording templates for ≠ME 永田詩央里のけれけれ.
  *
- * v0.23 also supports episodes that have a short pre-opening/cold-open before the normal title and
- * fixed introduction.  We only replace a block when many independent anchors match, so ordinary
- * talk later in the show is left untouched.
+ * v0.24 treats the tiny cold-open greeting separately from the later normal program introduction.
+ * The greeting is replaced only at the very beginning and only when the distinctive ハタハタ cue
+ * is present. This lets us be strong where the wording is known without turning later free talk
+ * into a template.
  */
 public final class KerekereFixedTemplate {
-    public static final String VERSION = "kerekere-fixed-template-v023-2026-09-06";
+    public static final String VERSION = "kerekere-fixed-template-v024-2026-09-06";
 
+    public static final String COLD_OPEN_1 = "こんばんは ノットイコールミーの永田詩央里です。";
+    public static final String COLD_OPEN_2 = "こんばんハタハタ。";
     public static final String OPENING_TITLE = "ノットイコールミー永田詩央里のけれけれ";
     public static final String OPENING_1 = "この番組はアイドルグループ ノットイコールミーの永田詩央里が パーソナリティを務めるラジオ番組 けれけれです。";
     public static final String OPENING_2 = "金曜の夜 1週間頑張ったラジオの向こうのあなたが 少しでも ほっこりできる時間になったら嬉しいので みんな最後まで聞いてけれ。";
     public static final String OPENING_3 = "番組の感想は ハッシュタグ 永田ラジオでたくさん投稿してください。";
 
+    private static final String COLD_OPEN_INLINE = COLD_OPEN_1 + " " + COLD_OPEN_2;
+    private static final String COLD_OPEN_BLOCK = COLD_OPEN_1 + "\n" + COLD_OPEN_2;
     private static final String OPENING_INLINE = OPENING_TITLE + "。 " + OPENING_1 + " " + OPENING_2 + " " + OPENING_3;
     private static final String OPENING_BLOCK = OPENING_TITLE + "\n\n" + OPENING_1 + "\n" + OPENING_2 + "\n" + OPENING_3;
     private static final String ENDING_1 = "ここまでのお相手はノットイコールミー永田詩央里でした。";
@@ -27,6 +32,8 @@ public final class KerekereFixedTemplate {
     public static ArrayList<String> biasTerms(String program) {
         ArrayList<String> out = new ArrayList<>();
         if (!KerekereContextProfile.applies(program)) return out;
+        out.add(COLD_OPEN_1);
+        out.add("こんばんハタハタ");
         out.add("ノットイコールミー永田詩央里のけれけれ");
         out.add("アイドルグループ ノットイコールミー");
         out.add("永田詩央里がパーソナリティを務める");
@@ -47,6 +54,8 @@ public final class KerekereFixedTemplate {
         String s = safe(segment).trim();
         if (!KerekereContextProfile.applies(program) || s.isEmpty()) return s;
 
+        s = refineColdOpen(previousText, s);
+
         if (isOpeningCandidate(previousText, s)) {
             int end = openingEnd(s);
             if (end > 0) {
@@ -59,10 +68,12 @@ public final class KerekereFixedTemplate {
         return s.replaceAll("[ \\t]{2,}", " ").trim();
     }
 
-    /** Final pass: replace the fixed block even when a cold-open happened before it. */
+    /** Final pass: repair the first greeting and the normal fixed block even after a cold-open. */
     public static String refineTranscript(String program, String transcript) {
         String s = safe(transcript).replace("\r\n", "\n").replace('\r', '\n').trim();
         if (!KerekereContextProfile.applies(program) || s.isEmpty()) return s;
+
+        s = refineColdOpenTranscript(s);
 
         OpeningWindow window = findOpeningWindow(s);
         if (window != null) {
@@ -88,15 +99,56 @@ public final class KerekereFixedTemplate {
         return s.replaceAll("\\n{3,}", "\n\n").trim();
     }
 
-    private static OpeningWindow findOpeningWindow(String s) {
-        int max = Math.min(s.length(), 3600);
-        String head = s.substring(0, max);
+    private static String refineColdOpen(String previousText, String current) {
+        // Only the first recognizer result is eligible.  "ハタハタ" is distinctive enough that a
+        // mangled "ノットイコールミーの永田詩央里です" can safely be restored around it.
+        if (compact(previousText).length() > 8) return current;
+        String compact = compact(current);
+        if (!compact.contains("ハタハタ")) return current;
+        if (!containsAny(compact, "こんばんは", "こんばん", "今晩")) return current;
+        if (compact.length() > 100) return current;
 
-        // The fixed description is the strongest anchor.  It can occur after a cold-open, as in
-        // diagnostic #11 where the normal intro began after the radio-cat discussion.
+        int h = current.indexOf("ハタハタ");
+        if (h < 0) return current;
+        int end = h + "ハタハタ".length();
+        while (end < current.length() && "。！？!?、 ".indexOf(current.charAt(end)) >= 0) end++;
+        String tail = trimLeadingPunctuation(current.substring(end));
+        return COLD_OPEN_INLINE + (tail.isEmpty() ? "" : " " + tail);
+    }
+
+    private static String refineColdOpenTranscript(String s) {
+        int limit = Math.min(260, s.length());
+        String head = s.substring(0, limit);
+        String c = compact(head);
+        if (!c.contains("ハタハタ") || !containsAny(c, "こんばんは", "こんばん", "今晩")) return s;
+
+        int h = head.indexOf("ハタハタ");
+        if (h < 0) return s;
+        int end = h + "ハタハタ".length();
+        while (end < head.length() && "。！？!?、 \t".indexOf(head.charAt(end)) >= 0) end++;
+
+        // v0.23 sometimes put the host identification on the line after "こんばんハタハタ".
+        // If that next short line is clearly only the host ID, absorb it into the canonical block.
+        int nl = head.indexOf('\n', end);
+        if (nl >= 0 && nl - end < 8) {
+            int nextNl = head.indexOf('\n', nl + 1);
+            if (nextNl < 0) nextNl = head.length();
+            String next = head.substring(nl + 1, nextNl);
+            String nc = compact(next);
+            if (nc.length() <= 35 && containsAny(nc, "永田詩央里", "ノットイコール", "長田詩織", "中田詩織")) {
+                end = nextNl;
+            }
+        }
+        String tail = trimLeadingPunctuation(s.substring(Math.min(end, s.length())));
+        return COLD_OPEN_BLOCK + (tail.isEmpty() ? "" : "\n" + tail);
+    }
+
+    private static OpeningWindow findOpeningWindow(String s) {
+        int max = Math.min(s.length(), 4200);
+        String head = s.substring(0, max);
         int desc = head.indexOf("この番組は");
         while (desc >= 0) {
-            int probeEnd = Math.min(head.length(), desc + 950);
+            int probeEnd = Math.min(head.length(), desc + 1050);
             String probe = head.substring(desc, probeEnd);
             if (openingAnchorScore(probe) >= 7) {
                 int endRel = openingEnd(probe);
@@ -111,9 +163,6 @@ public final class KerekereFixedTemplate {
     }
 
     private static int titleBlockStart(String head, int descriptionPos) {
-        // If "それではそろそろ始めて…" exists shortly before the description, preserve that
-        // sentence and replace from the following line/title fragment.  Otherwise replace from the
-        // nearest preceding line that looks like a mangled program-title fragment.
         int cue = Math.max(head.lastIndexOf("それではそろそろ始め", descriptionPos),
                 head.lastIndexOf("そろそろ始め", descriptionPos));
         if (cue >= 0 && descriptionPos - cue < 500) {
@@ -122,14 +171,14 @@ public final class KerekereFixedTemplate {
         }
 
         int line = head.lastIndexOf('\n', Math.max(0, descriptionPos - 1));
-        if (line >= 0 && descriptionPos - line < 120) return skipWhitespace(head, line + 1);
+        if (line >= 0 && descriptionPos - line < 140) return skipWhitespace(head, line + 1);
         return descriptionPos;
     }
 
     private static boolean isOpeningCandidate(String previousText, String current) {
         String prev = safe(previousText);
-        String recent = tail(prev, 700);
-        boolean earlyEnough = compact(prev).length() <= 3000;
+        String recent = tail(prev, 800);
+        boolean earlyEnough = compact(prev).length() <= 3500;
         boolean cueNearby = containsAny(recent, "それではそろそろ始め", "そろそろ始めて", "そろそろ始めて行きましょう");
         if (!earlyEnough && !cueNearby) return false;
         return openingAnchorScore(safe(current)) >= 7;
@@ -172,6 +221,8 @@ public final class KerekereFixedTemplate {
                     .replace("ノット エコールミー", "ノットイコールミー")
                     .replace("ノットエコールミー", "ノットイコールミー")
                     .replace("ノットイコールに", "ノットイコールミー")
+                    .replace("乗って これに", "ノットイコールミー")
+                    .replace("乗ってこれに", "ノットイコールミー")
                     .replace("長田しおり", "永田詩央里")
                     .replace("長田詩織", "永田詩央里")
                     .replace("長田 詩織", "永田詩央里")
@@ -223,7 +274,8 @@ public final class KerekereFixedTemplate {
     }
 
     private static boolean containsAny(String s, String... values) {
-        for (String v : values) if (safe(s).contains(v)) return true;
+        String x = safe(s);
+        for (String v : values) if (x.contains(v)) return true;
         return false;
     }
 
