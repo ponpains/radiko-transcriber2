@@ -4,7 +4,8 @@ import java.util.ArrayList;
 
 /**
  * Japanese radio-transcript formatter.
- * Goal: one human sentence per line, with blank lines only for real section changes.
+ * Goal: look like a person transcribed the radio: roughly one sentence per line, with blank lines
+ * reserved for real changes of mail/corner/topic rather than recognizer chunk boundaries.
  */
 public final class TranscriptSentenceFormatter {
     private TranscriptSentenceFormatter() {}
@@ -12,14 +13,18 @@ public final class TranscriptSentenceFormatter {
     private static final String[] STRONG_ENDINGS = {
             "ありがとうございました", "ありがとうございます", "よろしくお願いします", "お願いします",
             "おはようございます", "こんばんは", "こんにちは", "いただきます", "ごちそうさまでした",
-            "聞いてください", "お待ちしています", "届いております", "届いています",
+            "聞いてください", "見てください", "行ってみてください", "食べてみてください", "送ってみてください",
+            "してください", "ください", "くださいね", "お待ちしています", "届いております", "届いています",
             "と思います", "と思いました", "と思っています", "と思ってます", "と思うんです",
-            "気がします", "気がしました", "気がするんです", "だったんです", "なんです",
-            "なんですよ", "なんですよね", "なんですね", "でした", "ました", "ませんでした",
-            "ません", "でしょう", "でしょうか", "ですよ", "ですよね", "ですね", "ですか",
-            "ますか", "ましたか", "なんですか", "なんでしょうか", "いいですね",
-            "いいと思います", "していきます", "していきたいと思います", "やりたいと思います",
-            "始めていきましょう", "始めて行きましょう", "です", "ます"
+            "気がします", "気がしました", "気がするんです", "だったんです", "だったんですよ",
+            "なんです", "なんですよ", "なんですよね", "なんですね", "でした", "でしたね",
+            "ました", "ましたね", "ませんでした", "ません", "でしょう", "でしょうか", "ですよ",
+            "ですよね", "ですね", "ですか", "ますか", "ましたか", "なんですか", "なんでしょうか",
+            "いいですね", "いいと思います", "分かります", "分かりました", "あります", "ありません",
+            "いました", "いましたね", "なりました", "なっています", "なってます", "できました",
+            "していました", "してます", "したんです", "行きました", "来ました", "食べました",
+            "買いました", "見つけました", "していきます", "していきたいと思います",
+            "やりたいと思います", "始めていきましょう", "始めて行きましょう", "です", "ます"
     };
 
     private static final String[] SOFT_ENDINGS = {
@@ -34,7 +39,9 @@ public final class TranscriptSentenceFormatter {
             "あの", "なんか", "やっぱり", "やっぱ", "まず", "続いて", "続きまして", "次に",
             "ここから", "ということで", "というわけで", "ありがとうございます", "皆さん",
             "今回も", "では", "それでは", "さて", "ところで", "本当に", "もう", "今度",
-            "今日", "昨日", "明日", "来週", "例えば", "実際", "なんと", "えー", "えっと"
+            "今日", "昨日", "明日", "来週", "例えば", "実際", "なんと", "えー", "えっと",
+            "懐かしい", "個人的", "めちゃくちゃ", "女の子", "男の子", "母", "父", "親",
+            "そんな", "多分", "やっぱり", "もちろん", "一方", "そのまま", "その後"
     };
 
     private static final String[] TOPIC_STARTERS = {
@@ -53,10 +60,11 @@ public final class TranscriptSentenceFormatter {
         ArrayList<String> pieces = splitExistingPunctuation(s);
         ArrayList<String> out = new ArrayList<>();
         for (String piece : pieces) splitInferred(piece, out);
+        out = mergeMailPrefixLines(out);
 
         StringBuilder result = new StringBuilder();
         for (String line : out) {
-            String x = normalize(line);
+            String x = cleanupHumanLine(normalize(line));
             if (x.isEmpty()) continue;
             if (!endsWithPunctuation(x) && shouldCloseLine(x, utteranceBoundary)) {
                 x += sentenceLooksQuestion(x) ? "？" : "。";
@@ -81,22 +89,25 @@ public final class TranscriptSentenceFormatter {
         for (int i = 1; i < s.length(); i++) {
             if (!Character.isWhitespace(s.charAt(i))) continue;
             String left = s.substring(start, i).trim();
-            if (compactLength(left) < 6) continue;
+            if (compactLength(left) < 5) continue;
             int next = skipSpaces(s, i);
             if (next >= s.length()) break;
             String right = trimLeadingSymbols(s.substring(next));
 
             boolean strong = endsWithAny(left, STRONG_ENDINGS);
             boolean soft = endsWithAny(left, SOFT_ENDINGS);
+            boolean question = sentenceLooksQuestion(left);
             boolean newStart = startsWithAny(right, NEW_SENTENCE_STARTERS)
-                    || startsWithAny(right, TOPIC_STARTERS);
+                    || startsWithAny(right, TOPIC_STARTERS)
+                    || looksLikeRadioMailStarter(right)
+                    || startsWithLikelySubject(right);
             boolean continuation = startsWithAny(right,
                     new String[]{"ね", "よ", "けど", "けれど", "けれども", "が", "し", "ので",
                             "から", "って", "とか", "のでね", "からね", "んですけど"});
             boolean barePolite = left.endsWith("です") || left.endsWith("ます");
-            boolean strongBoundary = strong && !continuation
-                    && (!barePolite || newStart || compactLength(left) >= 22);
-            boolean softBoundary = soft && newStart && compactLength(left) >= 18;
+            boolean strongBoundary = (strong || question) && !continuation
+                    && (!barePolite || newStart || compactLength(left) >= 18);
+            boolean softBoundary = soft && newStart && compactLength(left) >= 16;
 
             if (strongBoundary || softBoundary) {
                 String sentence = left;
@@ -125,9 +136,11 @@ public final class TranscriptSentenceFormatter {
                 if (next >= s.length()) continue;
                 String left = s.substring(start, end).trim();
                 String right = trimLeadingSymbols(s.substring(next));
-                if (compactLength(left) < 10) continue;
+                if (compactLength(left) < 8) continue;
                 boolean likelyNew = startsWithAny(right, NEW_SENTENCE_STARTERS)
-                        || startsWithAny(right, TOPIC_STARTERS);
+                        || startsWithAny(right, TOPIC_STARTERS)
+                        || looksLikeRadioMailStarter(right)
+                        || startsWithLikelySubject(right);
                 if (likelyNew) {
                     boundary = end;
                     break;
@@ -172,6 +185,10 @@ public final class TranscriptSentenceFormatter {
             while (from < out.length()) {
                 int i = out.indexOf(marker, from);
                 if (i <= 0) break;
+                if ("ラジオネーム".equals(marker) && looksLikePrefecturePrefix(out, i)) {
+                    from = i + marker.length();
+                    continue;
+                }
                 String before = out.substring(Math.max(0, i - 90), i).trim();
                 if (compactLength(before) >= 16) {
                     int p = i - 1;
@@ -187,9 +204,55 @@ public final class TranscriptSentenceFormatter {
         return out;
     }
 
+    private static ArrayList<String> mergeMailPrefixLines(ArrayList<String> input) {
+        ArrayList<String> out = new ArrayList<>();
+        for (String line : input) {
+            String x = normalize(line);
+            if (!out.isEmpty() && x.startsWith("ラジオネーム")) {
+                String previous = out.get(out.size() - 1);
+                String bare = previous.replaceAll("[。！？!?]+$", "").trim();
+                if (isShortPrefecturePrefix(bare)) {
+                    out.set(out.size() - 1, bare + " " + x);
+                    continue;
+                }
+            }
+            out.add(x);
+        }
+        return out;
+    }
+
+    private static boolean looksLikePrefecturePrefix(String s, int markerIndex) {
+        int from = Math.max(0, markerIndex - 12);
+        String left = s.substring(from, markerIndex).replaceAll("[。！？!?]", "").trim();
+        return isShortPrefecturePrefix(left);
+    }
+
+    private static boolean isShortPrefecturePrefix(String s) {
+        String x = normalize(s).replaceAll("[。！？!?]+$", "").trim();
+        if (x.length() > 10) return false;
+        return x.matches(".*(?:都|道|府|県)(?:の)?$");
+    }
+
+    private static boolean looksLikeRadioMailStarter(String s) {
+        String x = trimLeadingSymbols(normalize(s));
+        if (x.startsWith("ラジオネーム")) return true;
+        return x.matches("^[^ \\t。！？!?]{1,8}(?:都|道|府|県)(?:の)?[ \\t]*ラジオネーム.*");
+    }
+
+    private static boolean startsWithLikelySubject(String s) {
+        String x = trimLeadingSymbols(normalize(s));
+        String[] subjects = {
+                "女の子", "男の子", "母", "父", "両親", "親", "私", "僕", "皆さん", "今回",
+                "これ", "それ", "この", "その", "懐かしい", "個人的", "めちゃくちゃ", "やっぱり",
+                "多分", "もちろん", "そして", "続いて", "ありがとうございます"
+        };
+        return startsWithAny(x, subjects) || looksLikeRadioMailStarter(x);
+    }
+
     private static boolean shouldCloseLine(String s, boolean utteranceBoundary) {
         String x = normalize(s);
         if (x.length() < 2) return false;
+        if (isShortPrefecturePrefix(x)) return false;
         if (looksOpenEnded(x)) return false;
         if (endsWithAny(x, STRONG_ENDINGS)) return true;
         if (sentenceLooksQuestion(x)) return true;
@@ -197,7 +260,7 @@ public final class TranscriptSentenceFormatter {
                 || x.endsWith("と思う") || x.endsWith("気がする") || x.endsWith("わけです")
                 || x.endsWith("ことです") || x.endsWith("でしたね") || x.endsWith("ますね")
                 || x.endsWith("ですよね") || x.endsWith("なんですよね")) return true;
-        return utteranceBoundary && compactLength(x) >= 12;
+        return utteranceBoundary && compactLength(x) >= 9;
     }
 
     private static boolean looksOpenEnded(String x) {
@@ -213,7 +276,16 @@ public final class TranscriptSentenceFormatter {
         String x = normalize(s);
         return x.endsWith("ですか") || x.endsWith("ますか") || x.endsWith("でしょうか")
                 || x.endsWith("なんですか") || x.endsWith("かな") || x.endsWith("ですかね")
-                || x.endsWith("ますかね") || x.endsWith("なんでしょう");
+                || x.endsWith("ますかね") || x.endsWith("なんでしょう") || x.endsWith("どうですか")
+                || x.endsWith("いかがでしょうか");
+    }
+
+    private static String cleanupHumanLine(String s) {
+        return normalize(s)
+                .replaceAll("[ \\t]+([、。！？!?])", "$1")
+                .replaceAll("([「『（(]) +", "$1")
+                .replaceAll(" +([」』）)])", "$1")
+                .trim();
     }
 
     private static boolean startsWithAny(String s, String[] values) {
