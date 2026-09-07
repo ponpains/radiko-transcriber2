@@ -1,17 +1,7 @@
 {
   "schemaVersion": 1,
-  "updatedAt": "2026-09-07",
+  "updatedAt": "2026-09-08",
   "files": [
-    "archive.json",
-    "x_2019_sep_oct_index.json",
-    "x_2021_q4.json",
-    "x_2021_nov_dec_index.json",
-    "x_2022_q1.json",
-    "x_2022_may_jul_index.json",
-    "x_2023_may_jul_index.json",
-    "x_2026_sep_recent.json",
-    "instagram_2023.json",
-    "interviews_2021_2024.json",
-    "showroom_topics_2020_2026.json"
+    "v070_refresh_anchor.json"
   ]
 }
