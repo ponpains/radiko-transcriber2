@@ -33,12 +33,13 @@ jobs:
         shell: bash
         run: |
           python3 - <<'PY'
-          import base64, pathlib, re
-          workflow = pathlib.Path('.github/workflows/build-apk.yml').read_text()
-          match = re.search(r"echo '([^']+)' \\| base64 --decode > debug\\.keystore", workflow)
-          if not match:
+          import base64, pathlib
+          text = pathlib.Path('.github/workflows/build-apk.yml').read_text()
+          line = next((x.strip() for x in text.splitlines() if x.strip().startswith("echo '") and 'base64 --decode > debug.keystore' in x), None)
+          if not line:
               raise SystemExit('stable debug key payload not found')
-          pathlib.Path('shiori-archive/debug.keystore').write_bytes(base64.b64decode(match.group(1)))
+          payload = line.split("echo '", 1)[1].split("' | base64", 1)[0]
+          pathlib.Path('shiori-archive/debug.keystore').write_bytes(base64.b64decode(payload))
           PY
           keytool -list -keystore shiori-archive/debug.keystore -storepass android -alias androiddebugkey >/dev/null
 
