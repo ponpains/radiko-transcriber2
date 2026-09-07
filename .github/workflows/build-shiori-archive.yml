@@ -8,234 +8,17 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Prepare bundled archive data
+      - name: Generate bundled archive data
         shell: bash
         run: |
-          mkdir -p shiori-archive/app/src/main/assets
-          python3 - <<'PY'
-          import hashlib, html as htmllib, json, re, urllib.request
-          from datetime import datetime, timezone, timedelta
-          from pathlib import Path
-
-          base = Path('shiori-archive/data')
-          manifest = json.loads((base / 'manifest.json').read_text(encoding='utf-8'))
-          merged = {}
-          for name in manifest.get('files', []):
-              if '/' in name or '..' in name or not name.endswith('.json'):
-                  raise SystemExit(f'unsafe shard name: {name}')
-              shard = json.loads((base / name).read_text(encoding='utf-8'))
-              for event in shard.get('events', []):
-                  event_id = str(event.get('id', '')).strip()
-                  if event_id:
-                      merged[event_id] = event
-
-          # Public fan-maintained topic index: discovery only and clearly labelled secondary.
-          generated_index = 0
-          try:
-              req = urllib.request.Request(
-                  'https://raw.githubusercontent.com/nagata-shiohigari/shiorin/main/index.html',
-                  headers={'User-Agent': 'ShioriArchive-build/0.6 (+public metadata indexer)'}
-              )
-              raw = urllib.request.urlopen(req, timeout=15).read().decode('utf-8', errors='replace')
-              section_labels = {
-                  'books':'本・ブログ','movies':'映画・ドラマ','gourmet':'グルメ','makeup':'メイク・ファッション',
-                  'characters':'キャラクター','events':'イベント','spots':'場所','people':'人物','items':'アイテム','personal':'パーソナル',
-                  'radio':'ラジオ','music':'音楽'
-              }
-              date_re = re.compile(r'(?<!\d)(\d{2})/(\d{1,2})/(\d{1,2})(?!\d)')
-              tag_re = re.compile(r'<[^>]+>')
-              for sec in re.finditer(r'<section\s+id="([^"]+)"[^>]*>(.*?)</section>', raw, flags=re.S|re.I):
-                  sec_id, body = sec.group(1), sec.group(2)
-                  label = section_labels.get(sec_id, sec_id)
-                  for li in re.findall(r'<li\b[^>]*>(.*?)</li>', body, flags=re.S|re.I):
-                      text = htmllib.unescape(tag_re.sub('', li))
-                      text = re.sub(r'\s+', ' ', text).strip()
-                      matches = list(date_re.finditer(text))
-                      if not matches:
-                          continue
-                      first = matches[0]
-                      title = re.sub(r'\s+', ' ', text[:first.start()].rstrip('（(、,。 ')).strip()
-                      if not title:
-                          continue
-                      if len(title) > 76:
-                          title = title[:73] + '…'
-                      for idx, m in enumerate(matches):
-                          y, mo, d = 2000+int(m.group(1)), int(m.group(2)), int(m.group(3))
-                          if not (2019 <= y <= 2026 and 1 <= mo <= 12 and 1 <= d <= 31):
-                              continue
-                          next_pos = matches[idx+1].start() if idx+1 < len(matches) else len(text)
-                          around = text[m.end():next_pos]
-                          if 'SHOWROOM' in around or 'SHOWROOM' in text[m.start():m.start()+70]: typ='SHOWROOM'
-                          elif 'Instagram' in around or 'Instagram' in text[m.start():m.start()+70]: typ='Instagram'
-                          elif re.search(r'(^|\s)X($|\s|\)|）)', around): typ='X'
-                          elif 'けれけれ' in around or 'ノイミーステーション' in around or 'FAV FOUR' in around or 'ラジオ' in around: typ='ラジオ'
-                          elif 'YouTube' in around or 'イコノイジョイチャンネル' in around: typ='YouTube'
-                          else: typ='発言索引'
-                          date = f'{y:04d}-{mo:02d}-{d:02d}'
-                          digest = hashlib.sha1(f'{sec_id}|{date}|{title}'.encode()).hexdigest()[:12]
-                          event_id = f'fanidx-{date}-{digest}'
-                          if event_id in merged:
-                              continue
-                          merged[event_id] = {
-                              'id': event_id, 'date': date, 'time': '', 'type': typ,
-                              'title': title,
-                              'summary': f'{label}として日付付きで整理されている話題。一次資料を確認できたものは今後そちらへ差し替えます。',
-                              'excerpt': '',
-                              'sourceName': '永田詩央里ちゃん情報局（非公式索引）',
-                              'sourceUrl': 'https://nagata-shiohigari.github.io/shiorin/',
-                              'confidence': '二次索引・要一次照合',
-                              'tags': [label, typ, '日付付き索引'], 'people': []
-                          }
-                          generated_index += 1
-          except Exception as e:
-              print('secondary index generation skipped:', repr(e))
-
-          # Recent本人X: keep a short literal excerpt, never an AI-written summary.
-          # The public timeline mirror is used only for discovery of current public posts.
-          JST = timezone(timedelta(hours=9))
-          now_jst = datetime.now(JST)
-          cutoff = now_jst - timedelta(days=35)
-          scrape_count = 0
-          enriched_count = 0
-          skipped_corrupt = 0
-          seen_text_time = set()
-
-          def clean_html(block):
-              block = re.sub(r'<br\s*/?>', '\n', block, flags=re.I)
-              block = re.sub(r'<[^>]+>', '', block)
-              block = htmllib.unescape(block)
-              block = block.replace('\r', '')
-              block = re.sub(r'[ \t]+', ' ', block)
-              block = re.sub(r'\n{3,}', '\n\n', block)
-              return block.strip()
-
-          def short_literal(text, limit=64):
-              flat = re.sub(r'\s+', ' ', text).strip()
-              return flat if len(flat) <= limit else flat[:limit].rstrip() + '…'
-
-          def title_from_original(text):
-              lines = [re.sub(r'https?://\S+', '', x).strip() for x in text.splitlines()]
-              first = next((x for x in lines if x), 'X投稿')
-              return first if len(first) <= 28 else first[:27].rstrip() + '…'
-
-          existing_by_time = {}
-          for event_id, event in merged.items():
-              if str(event.get('type','')).upper() == 'X':
-                  key = (str(event.get('date','')), str(event.get('time',''))[:5])
-                  if key[0] and key[1]:
-                      existing_by_time.setdefault(key, []).append(event_id)
-
-          try:
-              req = urllib.request.Request(
-                  'https://www.sotwe.com/nagata_shiori_',
-                  headers={'User-Agent':'Mozilla/5.0 ShioriArchive/0.6'}
-              )
-              raw = urllib.request.urlopen(req, timeout=20).read().decode('utf-8', errors='replace')
-              pattern = re.compile(
-                  r'<span>@nagata_shiori_</span>.*?<time datetime="([^"]+)"[^>]*>.*?</time>.*?'
-                  r'<div class="v-card__text body-1 text--primary tweet-text px-0">\s*'
-                  r'<div class="px-4 dynamic-link-content">(.*?)</div>',
-                  flags=re.S
-              )
-              for m in pattern.finditer(raw):
-                  try:
-                      dt = datetime.fromisoformat(m.group(1).replace('Z','+00:00')).astimezone(JST)
-                  except Exception:
-                      continue
-                  if dt < cutoff or dt > now_jst + timedelta(days=1):
-                      continue
-                  text = clean_html(m.group(2))
-                  if not text:
-                      continue
-                  if '\ufffd' in text:
-                      skipped_corrupt += 1
-                      continue
-                  unique = (dt.strftime('%Y-%m-%d %H:%M'), text)
-                  if unique in seen_text_time:
-                      continue
-                  seen_text_time.add(unique)
-                  date = dt.strftime('%Y-%m-%d')
-                  tm = dt.strftime('%H:%M')
-                  excerpt = short_literal(text)
-                  key = (date, tm)
-                  candidates = existing_by_time.get(key, [])
-                  if candidates:
-                      # Prefer the curated record with an exact individual URL when one exists.
-                      chosen = candidates[0]
-                      for cid in candidates:
-                          if '/status/' in str(merged[cid].get('sourceUrl','')):
-                              chosen = cid
-                              break
-                      merged[chosen]['excerpt'] = excerpt
-                      merged[chosen]['summary'] = ''
-                      merged[chosen]['tags'] = []
-                      if not str(merged[chosen].get('title','')).strip() or str(merged[chosen].get('title','')).strip() in ('X投稿','本人X投稿'):
-                          merged[chosen]['title'] = title_from_original(text)
-                      enriched_count += 1
-                      continue
-                  digest = hashlib.sha1(f'{date}|{tm}|{text}'.encode('utf-8')).hexdigest()[:14]
-                  event_id = f'x-sotwe-{digest}'
-                  if event_id in merged:
-                      continue
-                  merged[event_id] = {
-                      'id': event_id,
-                      'date': date,
-                      'time': tm,
-                      'type': 'X',
-                      'title': title_from_original(text),
-                      'summary': '',
-                      'excerpt': excerpt,
-                      'sourceName': 'X @nagata_shiori_',
-                      'sourceUrl': 'https://x.com/nagata_shiori_',
-                      'confidence': '本人公開X・日時と原文抜粋を公開タイムラインで確認',
-                      'tags': [],
-                      'people': []
-                  }
-                  existing_by_time.setdefault(key, []).append(event_id)
-                  scrape_count += 1
-          except Exception as e:
-              print('recent X scrape skipped:', repr(e))
-
-          # X records never display assistant summaries or generated hashtag metadata.
-          x_count = 0
-          x_excerpt_count = 0
-          latest_x = None
-          for event in merged.values():
-              if str(event.get('type','')).upper() != 'X':
-                  continue
-              event['summary'] = ''
-              event['tags'] = []
-              event.setdefault('excerpt','')
-              x_count += 1
-              if str(event.get('excerpt','')).strip():
-                  x_excerpt_count += 1
-              try:
-                  d = datetime.fromisoformat(str(event.get('date','')) + 'T' + (str(event.get('time',''))[:5] or '00:00')).replace(tzinfo=JST)
-                  if latest_x is None or d > latest_x:
-                      latest_x = d
-              except Exception:
-                  pass
-
-          output = {
-              'schemaVersion': 1,
-              'updatedAt': datetime.now(JST).strftime('%Y-%m-%d %H:%M'),
-              'notice': '公開情報の日時・出典を収録。Xは要約を付けず、確認できた原文の短い抜粋だけを表示します。二次索引はその旨を明示します。',
-              'events': list(merged.values()),
-          }
-          out = Path('shiori-archive/app/src/main/assets/archive_seed.json')
-          out.write_text(json.dumps(output, ensure_ascii=False, indent=2), encoding='utf-8')
-          print(f'generated secondary dated facts: {generated_index}')
-          print(f'recent X newly added: {scrape_count}')
-          print(f'recent X enriched: {enriched_count}')
-          print(f'recent X corrupt skipped: {skipped_corrupt}')
-          print(f'X records: {x_count}; X with original excerpt: {x_excerpt_count}')
-          print('latest X date/time:', latest_x.isoformat() if latest_x else 'none')
-          print(f'bundled events: {len(merged)}')
-          PY
+          python3 shiori-archive/scripts/generate_archive.py
+          test -s shiori-archive/app/src/main/assets/archive_seed.json
+          cat shiori-archive/app/src/main/assets/archive_build_report.json
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
@@ -275,8 +58,10 @@ jobs:
           "$APKSIGNER" verify --verbose --print-certs "$APK"
           "$AAPT" dump badging "$APK" | head -5
 
-      - name: Upload APK
+      - name: Upload APK and archive report
         uses: actions/upload-artifact@v4
         with:
-          name: shiori-archive-v0.6.0-apk
-          path: shiori-archive/app/build/outputs/apk/debug/app-debug.apk
+          name: shiori-archive-v0.7.0-apk
+          path: |
+            shiori-archive/app/build/outputs/apk/debug/app-debug.apk
+            shiori-archive/app/src/main/assets/archive_build_report.json
