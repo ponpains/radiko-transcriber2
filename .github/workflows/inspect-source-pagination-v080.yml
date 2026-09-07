@@ -1,0 +1,37 @@
+name: Inspect source pagination v080
+on:
+  workflow_dispatch:
+  push:
+    branches: ["shiori-archive-mvp"]
+    paths: ['.github/workflows/inspect-source-pagination-v080.yml']
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: inspect
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import urllib.request,re,json,html
+          UA={'User-Agent':'Mozilla/5.0 ShioriArchive/0.8'}
+          def get(u):
+            try:
+              return urllib.request.urlopen(urllib.request.Request(u,headers=UA),timeout=30).read().decode('utf-8','replace')
+            except Exception as e:return 'ERROR '+repr(e)
+          urls=[
+            'https://not-equal-me.jp/static/original/official/js/calendar.js',
+            'https://not-equal-me.jp/static/original/official/js/checkbox_calendar.js',
+            'https://not-equal-me.jp/static/common/js/jquery.autopager-1.0.0.min.js',
+            'https://not-equal-me.jp/schedule/calender/?year=2019&month=2',
+            'https://not-equal-me.jp/schedule/?year=2019&month=2',
+            'https://not-equal-me.jp/news/1',
+            'https://not-equal-me.jp/news/2',
+            'https://instagrammernews.com/user/58749300526?page=2',
+            'https://instagrammernews.com/user/58749300526?page=3',
+            'https://instagrammernews.com/user/58749300526/rss.xml',
+            'https://instagrammernews.com/detail/3223538944150780508'
+          ]
+          for u in urls:
+            t=get(u); print('\n===',u,'bytes',len(t),'==='); print(t[:12000])
+          PY
