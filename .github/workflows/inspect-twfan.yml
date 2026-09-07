@@ -1,4 +1,4 @@
-name: Inspect public archive extension routes
+name: Inspect public X datasets
 
 on:
   push:
@@ -9,44 +9,60 @@ jobs:
   inspect:
     runs-on: ubuntu-latest
     steps:
-      - name: Test Wayback CDX and X oEmbed
+      - name: Inspect GitHub CSV and Wayback snapshot text
         shell: bash
         run: |
           python3 - <<'PY'
-          import urllib.request, urllib.parse, json, re
-          headers={'User-Agent':'ShioriArchive/0.7 research contact via GitHub'}
-          for url in ['https://web.archive.org/robots.txt','https://publish.twitter.com/robots.txt']:
-            try:
-              raw=urllib.request.urlopen(urllib.request.Request(url,headers=headers),timeout=20).read().decode('utf-8','replace')
-              print('\nROBOTS',url,'\n',raw[:3000])
-            except Exception as e: print('ROBOTS ERR',url,repr(e))
+          import csv, io, json, re, urllib.request, html as htmllib, time
+          from datetime import datetime, timezone, timedelta
 
-          queries=[
-            'https://web.archive.org/cdx/search/cdx?url=twitter.com/nagata_shiori_/status/*&output=json&filter=statuscode:200&collapse=urlkey&fl=timestamp,original&limit=5000',
-            'https://web.archive.org/cdx/search/cdx?url=x.com/nagata_shiori_/status/*&output=json&filter=statuscode:200&collapse=urlkey&fl=timestamp,original&limit=5000'
-          ]
-          ids=set()
-          for url in queries:
-            try:
-              raw=urllib.request.urlopen(urllib.request.Request(url,headers=headers),timeout=60).read().decode('utf-8','replace')
-              print('\nCDX bytes',len(raw),'prefix',raw[:300])
+          UA={'User-Agent':'ShioriArchive-research/0.7 (+public archive validation)'}
+          def get(url, timeout=45):
+              return urllib.request.urlopen(urllib.request.Request(url,headers=UA),timeout=timeout).read().decode('utf-8','replace')
+
+          # Public GitHub CSV dataset
+          raw=get('https://raw.githubusercontent.com/ydevx/udeep/main/sns/dat5/nagata_shiori_.csv')
+          rows=list(csv.DictReader(io.StringIO(raw)))
+          print('GITHUB_CSV bytes',len(raw),'rows',len(rows))
+          dates=[r.get('created_at','') for r in rows if r.get('created_at')]
+          print('GITHUB_CSV range',min(dates) if dates else None,max(dates) if dates else None)
+          print('GITHUB_CSV unique ids',len({r.get('id') for r in rows if r.get('id')}))
+
+          # Wayback CDX - find IDs outside twfan era and inspect snapshots.
+          cdx=get('https://web.archive.org/cdx/search/cdx?url=twitter.com/nagata_shiori_/status/*&output=json&filter=statuscode:200&collapse=urlkey&fl=timestamp,original&limit=5000',60)
+          rows_cdx=json.loads(cdx)
+          byid={}
+          for ts,orig in rows_cdx[1:]:
+              m=re.search(r'/status/(\d{15,22})',orig)
+              if m: byid.setdefault(m.group(1),(ts,orig))
+          ids=sorted(byid,key=int)
+          print('WAYBACK ids',len(ids))
+          # sample late IDs likely beyond 2023-07 plus a few old IDs
+          sample=ids[-8:]+ids[:2]
+          for sid in sample:
+              ts,orig=byid[sid]
+              snap=f'https://web.archive.org/web/{ts}id_/{orig}'
               try:
-                rows=json.loads(raw)
-                for row in rows[1:]:
-                  if len(row)>1:
-                    m=re.search(r'/status/(\d{15,22})',row[1])
-                    if m: ids.add(m.group(1))
-                print('rows',max(0,len(rows)-1),'unique ids cumulative',len(ids))
-              except Exception as e: print('CDX JSON ERR',repr(e))
-            except Exception as e: print('CDX ERR',repr(e))
-          print('TOTAL_IDS',len(ids),'sample',sorted(ids,key=int)[:3],sorted(ids,key=int)[-3:] if ids else [])
-
-          samples=['1099638521118175232','1413859487685890053','1657569391175962625']
-          for sid in samples:
-            url='https://publish.twitter.com/oembed?omit_script=1&dnt=1&url='+urllib.parse.quote('https://twitter.com/nagata_shiori_/status/'+sid,safe='')
-            try:
-              raw=urllib.request.urlopen(urllib.request.Request(url,headers=headers),timeout=20).read().decode('utf-8','replace')
-              data=json.loads(raw)
-              print('\nOEMBED',sid,'author',data.get('author_name'),'html',data.get('html','')[:1000])
-            except Exception as e: print('OEMBED ERR',sid,repr(e))
+                  page=get(snap,30)
+                  candidates=[]
+                  for pat in [
+                      r'<meta[^>]+(?:property|name)=["\'](?:og:description|description)["\'][^>]+content=["\']([^"\']+)',
+                      r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+(?:property|name)=["\'](?:og:description|description)["\']',
+                      r'"text"\s*:\s*"((?:\\.|[^"\\]){10,500})"',
+                      r'data-testid=["\']tweetText["\'][^>]*>(.*?)</div>'
+                  ]:
+                      ms=re.findall(pat,page,re.I|re.S)
+                      if ms: candidates.extend(ms[:3])
+                  cleaned=[]
+                  for x in candidates:
+                      x=re.sub(r'<br\s*/?>','\n',x,flags=re.I)
+                      x=re.sub(r'<[^>]+>','',x)
+                      x=htmllib.unescape(x)
+                      x=x.replace('\\n',' ').replace('\\"','"')
+                      x=re.sub(r'\s+',' ',x).strip()
+                      if x and x not in cleaned: cleaned.append(x)
+                  print('SNAP',sid,ts,'bytes',len(page),'candidates',len(cleaned),'sample',cleaned[:2])
+              except Exception as e:
+                  print('SNAP_ERR',sid,ts,repr(e))
+              time.sleep(0.5)
           PY
