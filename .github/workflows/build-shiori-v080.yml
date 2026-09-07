@@ -28,6 +28,7 @@ jobs:
           unzip -q v070.zip -d v070
           APK=$(find v070 -type f -name 'shiori-archive-v0.7.0-final.apk' | head -1)
           test -s "$APK"
+          mkdir -p shiori-archive/app/src/main/assets
           unzip -p "$APK" assets/archive_seed.json > shiori-archive/app/src/main/assets/archive_seed.json
           test -s shiori-archive/app/src/main/assets/archive_seed.json
 
@@ -44,9 +45,9 @@ jobs:
         run: |
           python3 - <<'PY'
           from pathlib import Path
+          import re
           p=Path('shiori-archive/app/build.gradle')
           s=p.read_text()
-          import re
           s=re.sub(r'versionCode\s+\d+','versionCode 11',s)
           s=re.sub(r'versionName\s+"[^"]+"','versionName "0.8.0"',s)
           p.write_text(s)
