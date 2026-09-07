@@ -1,0 +1,33 @@
+name: Inspect Twfan archive structure
+
+on:
+  push:
+    branches: [ "shiori-archive-mvp" ]
+  workflow_dispatch:
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Inspect pages and links
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import re, urllib.request, html
+          base='https://twfan.net/user/1098230959269281792'
+          for mode in ['old','new','favorite']:
+            for page in [1,2,5,10,15,20,25,30,40,50]:
+              url=f'{base}/{mode}/{page}'
+              try:
+                req=urllib.request.Request(url,headers={'User-Agent':'Mozilla/5.0 ShioriArchive/0.7'})
+                raw=urllib.request.urlopen(req,timeout=20).read().decode('utf-8',errors='replace')
+              except Exception as e:
+                print(mode,page,'ERROR',repr(e)); continue
+              dates=re.findall(r'20\d\d/\d\d/\d\d\([^)]*\) \d\d:\d\d:\d\d', raw)
+              hrefs=re.findall(r'href="([^"]+)"[^>]*>\s*このツイートへ',raw,re.S)
+              status=[]
+              for h in hrefs:
+                m=re.search(r'(?:twitter|x)\.com/nagata_shiori_/status/(\d+)',html.unescape(h),re.I)
+                if m: status.append(m.group(1))
+              print(mode,page,'bytes',len(raw),'dates',len(dates),'tweet_links',len(hrefs),'status',len(status),'first_date',dates[0] if dates else None,'last_date',dates[-1] if dates else None,'sample_href',hrefs[0][:150] if hrefs else None)
+          PY
