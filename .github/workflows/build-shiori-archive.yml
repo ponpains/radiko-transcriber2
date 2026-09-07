@@ -35,7 +35,7 @@ jobs:
           output = {
               'schemaVersion': 1,
               'updatedAt': manifest.get('updatedAt', ''),
-              'notice': '公開情報の日時・短い要約・タグ・出典URLのみ。記録なしは活動なしを意味しません。',
+              'notice': '公開・適法に確認できる情報の日時、短い要約、タグ、出典URLを収録。記録なしは活動なしを意味しません。',
               'events': list(merged.values()),
           }
           out = Path('shiori-archive/app/src/main/assets/archive_seed.json')
@@ -84,5 +84,5 @@ jobs:
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: shiori-archive-v0.2.1-apk
+          name: shiori-archive-v0.3.0-apk
           path: shiori-archive/app/build/outputs/apk/debug/app-debug.apk
