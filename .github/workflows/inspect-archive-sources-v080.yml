@@ -1,0 +1,52 @@
+name: Inspect archive sources v080
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["shiori-archive-mvp"]
+    paths:
+      - '.github/workflows/inspect-archive-sources-v080.yml'
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Inspect public source structure
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import re, urllib.request
+          from urllib.error import HTTPError
+          UA={'User-Agent':'Mozilla/5.0 ShioriArchive/0.8 source-inspection'}
+          def get(url, timeout=25):
+              try:
+                  req=urllib.request.Request(url,headers=UA)
+                  return urllib.request.urlopen(req,timeout=timeout).read().decode('utf-8','replace')
+              except Exception as e:
+                  return f'ERROR {type(e).__name__}: {e}'
+          urls={
+            'not_equal_robots':'https://not-equal-me.jp/robots.txt',
+            'not_equal_schedule':'https://not-equal-me.jp/schedule/',
+            'not_equal_news':'https://not-equal-me.jp/news/',
+            'instagrammer_robots':'https://instagrammernews.com/robots.txt',
+            'instagrammer_profile':'https://instagrammernews.com/user/58749300526',
+            'radiko_robots':'https://radiko.jp/robots.txt',
+            'radiko_kerekere':'https://radiko.jp/podcast/channels/cf8c3a32-e6a6-44a4-b43a-5d2817b91b6f',
+          }
+          for name,url in urls.items():
+              text=get(url)
+              print('\n===== '+name+' '+url+' bytes='+str(len(text))+' =====')
+              if 'robots' in name:
+                  print(text[:5000])
+                  continue
+              pats=[r'https?://[^\"\'<> ]+',r'(?:api|ajax|load|more|page|offset|cursor|schedule|news)[^\"\'<> ]{0,160}',r'<script[^>]+src=[\"\']([^\"\']+)',r'href=[\"\']([^\"\']+)']
+              out=[]
+              for p in pats:
+                  try:
+                      for m in re.finditer(p,text,re.I):
+                          s=m.group(1) if m.groups() else m.group(0)
+                          if s not in out: out.append(s)
+                  except re.error: pass
+              for x in out[:250]: print(x[:500])
+          PY
