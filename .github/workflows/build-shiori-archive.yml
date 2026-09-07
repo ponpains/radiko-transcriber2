@@ -17,7 +17,7 @@ jobs:
         run: |
           mkdir -p shiori-archive/app/src/main/assets
           python3 - <<'PY'
-          import json
+          import hashlib, html as htmllib, json, re, urllib.request
           from pathlib import Path
 
           base = Path('shiori-archive/data')
@@ -32,14 +32,77 @@ jobs:
                   if event_id:
                       merged[event_id] = event
 
+          # A public fan-maintained index is used only as a secondary discovery/index source.
+          # Each dated list item becomes a compact factual record. We do not copy long passages.
+          generated = 0
+          try:
+              req = urllib.request.Request(
+                  'https://raw.githubusercontent.com/nagata-shiohigari/shiorin/main/index.html',
+                  headers={'User-Agent': 'ShioriArchive-build/0.4 (+public metadata indexer)'}
+              )
+              raw = urllib.request.urlopen(req, timeout=15).read().decode('utf-8', errors='replace')
+              section_labels = {
+                  'books':'本・ブログ','movies':'映画・ドラマ','gourmet':'グルメ','makeup':'メイク・ファッション',
+                  'characters':'キャラクター','events':'イベント','spots':'場所','people':'人物','items':'アイテム','personal':'パーソナル',
+                  'radio':'ラジオ','music':'音楽'
+              }
+              date_re = re.compile(r'(?<!\d)(\d{2})/(\d{1,2})/(\d{1,2})(?!\d)')
+              tag_re = re.compile(r'<[^>]+>')
+              for sec in re.finditer(r'<section\s+id="([^"]+)"[^>]*>(.*?)</section>', raw, flags=re.S|re.I):
+                  sec_id, body = sec.group(1), sec.group(2)
+                  label = section_labels.get(sec_id, sec_id)
+                  for li in re.findall(r'<li\b[^>]*>(.*?)</li>', body, flags=re.S|re.I):
+                      text = htmllib.unescape(tag_re.sub('', li))
+                      text = re.sub(r'\s+', ' ', text).strip()
+                      matches = list(date_re.finditer(text))
+                      if not matches:
+                          continue
+                      first = matches[0]
+                      title = text[:first.start()].rstrip('（(、,。 ')
+                      title = re.sub(r'\s+', ' ', title).strip()
+                      if not title:
+                          continue
+                      if len(title) > 76:
+                          title = title[:73] + '…'
+                      for idx, m in enumerate(matches):
+                          y, mo, d = 2000+int(m.group(1)), int(m.group(2)), int(m.group(3))
+                          if not (2019 <= y <= 2026 and 1 <= mo <= 12 and 1 <= d <= 31):
+                              continue
+                          next_pos = matches[idx+1].start() if idx+1 < len(matches) else len(text)
+                          around = text[m.end():next_pos]
+                          if 'SHOWROOM' in around or 'SHOWROOM' in text[m.start():m.start()+70]: typ='SHOWROOM'
+                          elif 'Instagram' in around or 'Instagram' in text[m.start():m.start()+70]: typ='Instagram'
+                          elif re.search(r'(^|\s)X($|\s|\)|）)', around): typ='X'
+                          elif 'けれけれ' in around or 'ノイミーステーション' in around or 'FAV FOUR' in around or 'ラジオ' in around: typ='ラジオ'
+                          elif 'YouTube' in around or 'イコノイジョイチャンネル' in around: typ='YouTube'
+                          else: typ='発言索引'
+                          date = f'{y:04d}-{mo:02d}-{d:02d}'
+                          digest = hashlib.sha1(f'{sec_id}|{date}|{title}'.encode()).hexdigest()[:12]
+                          event_id = f'fanidx-{date}-{digest}'
+                          if event_id in merged:
+                              continue
+                          merged[event_id] = {
+                              'id': event_id, 'date': date, 'time': '', 'type': typ,
+                              'title': title,
+                              'summary': f'{label}として日付付きで整理されている話題。一次資料を確認できたものは今後そちらへ差し替えます。',
+                              'sourceName': '永田詩央里ちゃん情報局（非公式索引）',
+                              'sourceUrl': 'https://nagata-shiohigari.github.io/shiorin/',
+                              'confidence': '二次索引・要一次照合',
+                              'tags': [label, typ, '日付付き索引'], 'people': []
+                          }
+                          generated += 1
+          except Exception as e:
+              print('secondary index generation skipped:', repr(e))
+
           output = {
               'schemaVersion': 1,
               'updatedAt': manifest.get('updatedAt', ''),
-              'notice': '公開・適法に確認できる情報の日時、短い要約、タグ、出典URLを収録。記録なしは活動なしを意味しません。',
+              'notice': '公開・適法に確認できる情報の日時、短い要約、タグ、出典URLを収録。二次索引はその旨を明示。記録なしは活動なしを意味しません。',
               'events': list(merged.values()),
           }
           out = Path('shiori-archive/app/src/main/assets/archive_seed.json')
           out.write_text(json.dumps(output, ensure_ascii=False, indent=2), encoding='utf-8')
+          print(f'generated secondary dated facts: {generated}')
           print(f'bundled events: {len(merged)}')
           PY
 
@@ -84,5 +147,5 @@ jobs:
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: shiori-archive-v0.3.0-apk
+          name: shiori-archive-v0.4.0-apk
           path: shiori-archive/app/build/outputs/apk/debug/app-debug.apk
