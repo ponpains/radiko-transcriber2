@@ -1,0 +1,27 @@
+name: Debug Sotwe markup
+
+on:
+  push:
+    branches: [ "shiori-archive-mvp" ]
+  workflow_dispatch:
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Inspect current public timeline markup
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import re, urllib.request
+          url='https://www.sotwe.com/nagata_shiori_'
+          req=urllib.request.Request(url,headers={'User-Agent':'Mozilla/5.0 ShioriArchive-debug'})
+          raw=urllib.request.urlopen(req,timeout=20).read().decode('utf-8',errors='replace')
+          print('bytes',len(raw))
+          for needle in ['対面イベントin大阪','12th対面イベントin大阪','たこ焼き食べたよ','甘辛しおりん','ぼのぼの展']:
+              k=raw.find(needle)
+              print('\n===',needle,'index',k,'===')
+              if k>=0:
+                  print(raw[max(0,k-1200):k+1800])
+          print('\nstatus ids', re.findall(r'(?:status|tweet)[/=:"\\ ]+(\d{15,22})',raw,re.I)[:80])
+          PY
