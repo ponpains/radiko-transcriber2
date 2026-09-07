@@ -3,35 +3,19 @@ tasks.named("preBuild").configure {
     doLast {
         File formatter = file("src/main/java/com/example/radikotranscriber/TranscriptSentenceFormatter.java")
         String f = formatter.getText("UTF-8")
-        String oldFormatterReturn = '''        return result.toString().trim();
-    }
-
-    public static boolean isTopicStarter'''
-        String newFormatterReturn = '''        return RadioMailLayoutV028.apply(result.toString().trim());
-    }
-
-    public static boolean isTopicStarter'''
         if (!f.contains("RadioMailLayoutV028.apply(result.toString().trim())")) {
-            if (!f.contains(oldFormatterReturn)) throw new GradleException("v0.28: formatter return marker missing")
-            f = f.replace(oldFormatterReturn, newFormatterReturn)
+            String marker = '''        return result.toString().trim();'''
+            if (!f.contains(marker)) throw new GradleException("v0.28: formatter return marker missing")
+            f = f.replace(marker, '''        return RadioMailLayoutV028.apply(result.toString().trim());''')
         }
         formatter.write(f, "UTF-8")
 
         File proofreader = file("src/main/java/com/example/radikotranscriber/TranscriptFinalProofreaderV027.java")
         String p = proofreader.getText("UTF-8")
-        String oldProofReturn = '''        s = KerekereObservedCorrectionsV027.refineTranscript(program, s);
-        return normalize(s);
-    }
-
-    private static String removeLocalReplayResidue'''
-        String newProofReturn = '''        s = KerekereObservedCorrectionsV027.refineTranscript(program, s);
-        return normalize(RadioMailLayoutV028.apply(s));
-    }
-
-    private static String removeLocalReplayResidue'''
         if (!p.contains("return normalize(RadioMailLayoutV028.apply(s));")) {
-            if (!p.contains(oldProofReturn)) throw new GradleException("v0.28: final proofreader marker missing")
-            p = p.replace(oldProofReturn, newProofReturn)
+            String marker = '''        return normalize(s);'''
+            if (!p.contains(marker)) throw new GradleException("v0.28: final proofreader marker missing")
+            p = p.replace(marker, '''        return normalize(RadioMailLayoutV028.apply(s));''')
         }
         proofreader.write(p, "UTF-8")
 
