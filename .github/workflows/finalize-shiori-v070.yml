@@ -1,0 +1,166 @@
+name: Finalize Shiori Archive v0.7.0
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ "shiori-archive-mvp" ]
+    paths:
+      - ".github/workflows/finalize-shiori-v070.yml"
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  finalize:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download successful v0.7.0 base artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          curl -fL \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/artifacts/10024668969/zip" \
+            -o base-artifact.zip
+          unzip -q base-artifact.zip -d base-artifact
+          test -s base-artifact/build/outputs/apk/debug/app-debug.apk
+
+      - name: Patch archive links and freeze this bundled dataset
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, re, struct, zlib, zipfile
+          from pathlib import Path
+          from collections import Counter
+
+          src=Path('base-artifact/build/outputs/apk/debug/app-debug.apk')
+          dst=Path('shiori-v0.7.0-final-unsigned.apk')
+          report_path=Path('shiori-v0.7.0-final-report.json')
+
+          generic_exact={
+            'https://x.com/nagata_shiori_','https://twitter.com/nagata_shiori_',
+            'https://www.instagram.com/nagata__shiori','https://www.instagram.com/nagata__shiori/',
+            'https://www.tiktok.com/@notequal_me_shiori','https://www.tiktok.com/@notequal_me_shiori/',
+            'https://nagata-shiohigari.github.io/shiorin','https://nagata-shiohigari.github.io/shiorin/',
+            'https://not-equal-me.jp/schedule','https://not-equal-me.jp/schedule/',
+            'https://www.youtube.com/@notequalme_official','https://www.youtube.com/@notequalme_official/',
+            'https://abcradio.asahi.co.jp/program/noimestation','https://abcradio.asahi.co.jp/program/noimestation/'
+          }
+          def not_individual(url):
+            u=(url or '').strip()
+            if not u: return False
+            if u in generic_exact: return True
+            if u.startswith('https://radiko.jp/podcast/channels/cf8c3a32-e6a6-44a4-b43a-5d2817b91b6f'):
+              return True
+            if 'showroom-live.com/room/profile' in u and 'event_id=' not in u:
+              return True
+            return False
+
+          seed_report={}
+          remote_patch_count=0
+          with zipfile.ZipFile(src,'r') as zin, zipfile.ZipFile(dst,'w',allowZip64=True) as zout:
+            for info in zin.infolist():
+              # Drop any old v1 signature metadata. v0.7.0 used v2, but keep this robust.
+              upper=info.filename.upper()
+              if upper.startswith('META-INF/') and upper.endswith(('.SF','.RSA','.DSA','.EC')):
+                continue
+              data=zin.read(info.filename)
+              if info.filename=='assets/archive_seed.json':
+                root=json.loads(data.decode('utf-8'))
+                removed=0
+                for e in root.get('events',[]):
+                  if not_individual(e.get('sourceUrl','')):
+                    e['sourceUrl']=''
+                    removed+=1
+                root['updatedAt']='2026-09-08 07:13'
+                root['notice']='公開情報を日付で収録。Xは本人原文の短い抜粋のみでAI要約なし。個別コンテンツURLを確認できない記録では参照ボタンを表示しません。'
+                events=root.get('events',[])
+                types=Counter(str(e.get('type','')) for e in events)
+                x=[e for e in events if str(e.get('type','')).upper()=='X']
+                seed_report={
+                  'version':'0.7.0',
+                  'total_events':len(events),
+                  'x_records':len(x),
+                  'x_with_literal_excerpt':sum(1 for e in x if str(e.get('excerpt','')).strip()),
+                  'x_with_individual_status_url':sum(1 for e in x if re.search(r'/status/\\d{15,22}',str(e.get('sourceUrl','')))),
+                  'instagram_records':types.get('Instagram',0),
+                  'showroom_records':types.get('SHOWROOM',0),
+                  'radio_records':types.get('ラジオ',0),
+                  'interview_records':types.get('インタビュー',0),
+                  'non_individual_source_buttons_removed':removed,
+                  'type_counts':dict(types)
+                }
+                data=json.dumps(root,ensure_ascii=False,separators=(',',':')).encode('utf-8')
+              elif info.filename=='classes.dex':
+                # Freeze this bundled snapshot so an older remote manifest cannot re-add
+                # legacy/profile-only links after installation. Replace only with same-length bytes.
+                old=b'https://raw.githubusercontent.com/ponpains/radiko-transcriber2/shiori-archive-mvp/shiori-archive/data/'
+                new=b'https://raw.githubusercontent.com/ponpains/radiko-transcriber2/shiori-archive-mvp/shiori-archive/stop/'
+                if len(old)!=len(new): raise SystemExit('DEX URL patch length mismatch')
+                if old in data:
+                  b=bytearray(data.replace(old,new))
+                  remote_patch_count=1
+                  # Recompute DEX SHA-1 signature and Adler-32 checksum.
+                  b[12:32]=hashlib.sha1(b[32:]).digest()
+                  b[8:12]=struct.pack('<I',zlib.adler32(b[12:]) & 0xffffffff)
+                  data=bytes(b)
+              # Preserve compression method and most metadata while omitting APK signing block.
+              ni=zipfile.ZipInfo(info.filename, date_time=info.date_time)
+              ni.compress_type=info.compress_type
+              ni.comment=info.comment
+              ni.extra=info.extra
+              ni.internal_attr=info.internal_attr
+              ni.external_attr=info.external_attr
+              ni.create_system=info.create_system
+              zout.writestr(ni,data)
+
+          seed_report['bundled_remote_refresh_frozen']=bool(remote_patch_count)
+          report_path.write_text(json.dumps(seed_report,ensure_ascii=False,indent=2),encoding='utf-8')
+          print(json.dumps(seed_report,ensure_ascii=False,indent=2))
+          PY
+
+      - name: Restore stable signing key
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import base64, pathlib
+          text=pathlib.Path('.github/workflows/build-apk.yml').read_text()
+          line=next((x.strip() for x in text.splitlines() if x.strip().startswith("echo '") and 'base64 --decode > debug.keystore' in x),None)
+          if not line: raise SystemExit('stable debug key payload not found')
+          payload=line.split("echo '",1)[1].split("' | base64",1)[0]
+          pathlib.Path('debug.keystore').write_bytes(base64.b64decode(payload))
+          PY
+          test "$(sha256sum debug.keystore | awk '{print $1}')" = "61cf96e814e00aa9238125a6b533cedfd476c8790e401c77167dc9e4d8d06664"
+
+      - name: Zipalign and sign final APK
+        shell: bash
+        run: |
+          ZIPALIGN=$(find "$ANDROID_HOME/build-tools" -type f -name zipalign | sort -V | tail -1)
+          APKSIGNER=$(find "$ANDROID_HOME/build-tools" -type f -name apksigner | sort -V | tail -1)
+          AAPT=$(find "$ANDROID_HOME/build-tools" -type f -name aapt | sort -V | tail -1)
+          test -n "$ZIPALIGN" && test -n "$APKSIGNER" && test -n "$AAPT"
+          "$ZIPALIGN" -f -p 4 shiori-v0.7.0-final-unsigned.apk shiori-v0.7.0-final-aligned.apk
+          "$APKSIGNER" sign \
+            --ks debug.keystore --ks-key-alias androiddebugkey \
+            --ks-pass pass:android --key-pass pass:android \
+            --out shiori-archive-v0.7.0-final.apk \
+            shiori-v0.7.0-final-aligned.apk
+          "$APKSIGNER" verify --verbose --print-certs shiori-archive-v0.7.0-final.apk
+          "$AAPT" dump badging shiori-archive-v0.7.0-final.apk | head -5
+          sha256sum shiori-archive-v0.7.0-final.apk | tee shiori-archive-v0.7.0-final.sha256
+
+      - name: Upload final APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: shiori-archive-v0.7.0-final
+          path: |
+            shiori-archive-v0.7.0-final.apk
+            shiori-v0.7.0-final-report.json
+            shiori-archive-v0.7.0-final.sha256
