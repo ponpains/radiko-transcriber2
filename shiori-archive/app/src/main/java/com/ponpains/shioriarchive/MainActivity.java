@@ -1,0 +1,36 @@
+package com.ponpains.shioriarchive;
+
+import android.content.Intent;
+import android.graphics.Color;
+import android.graphics.Typeface;
+import android.graphics.drawable.GradientDrawable;
+import android.net.Uri;
+import android.os.Bundle;
+import android.text.Editable;
+import android.text.TextWatcher;
+import android.view.Gravity;
+import android.view.View;
+import android.view.ViewGroup;
+import android.widget.*;
+import androidx.annotation.Nullable;
+import androidx.appcompat.app.AppCompatActivity;
+import java.time.LocalDate;
+import java.time.format.DateTimeFormatter;
+import java.util.*;
+
+public class MainActivity extends AppCompatActivity {
+    static final int INK=Color.rgb(32,33,36), PAPER=Color.rgb(250,249,246), ACCENT=Color.rgb(66,92,89), SOFT=Color.rgb(225,233,231), LINE=Color.rgb(226,225,220), MUTED=Color.rgb(105,105,105);
+    ArchiveRepository repo; List<ArchiveEvent> events=new ArrayList<>(); String updated=""; FrameLayout content; TextView status;
+    @Override protected void onCreate(@Nullable Bundle b){super.onCreate(b);repo=new ArchiveRepository(this);ArchiveRepository.ArchiveData d=repo.loadBestAvailable();events=d.events;updated=d.updatedAt;setContentView(shell());home();repo.refreshIfNeeded((e,u)->{events=e;updated=u;status.setText(stat());home();});}
+    View shell(){LinearLayout r=col();r.setPadding(dp(18),dp(14),dp(18),dp(10));r.addView(tx("詩央里暦",28,INK,true));r.addView(tx("永田詩央里さんの公開記録を、日付からたどる",13,MUTED,false));status=tx(stat(),11,MUTED,false);status.setPadding(0,dp(3),0,dp(10));r.addView(status);content=new FrameLayout(this);r.addView(content,new LinearLayout.LayoutParams(-1,0,1));LinearLayout nav=new LinearLayout(this);nav.setOrientation(LinearLayout.HORIZONTAL);nav.setGravity(Gravity.CENTER);nav.addView(nb("今日",v->home()),nlp());nav.addView(nb("カレンダー",v->calendar()),nlp());nav.addView(nb("検索",v->search()),nlp());r.addView(nav);return r;}
+    String stat(){return "確認済み "+events.size()+"件  ·  データ更新 "+(updated.isEmpty()?"—":updated);} LinearLayout.LayoutParams nlp(){LinearLayout.LayoutParams p=new LinearLayout.LayoutParams(0,dp(46),1);p.setMargins(dp(3),0,dp(3),0);return p;} Button nb(String s,View.OnClickListener l){Button b=new Button(this);b.setText(s);b.setAllCaps(false);b.setTextSize(13);b.setTextColor(INK);b.setBackground(bg(Color.WHITE,16,LINE));b.setOnClickListener(l);return b;}
+    void home(){LinearLayout b=col();LocalDate now=LocalDate.now();b.addView(tx(now.getMonthValue()+"月"+now.getDayOfMonth()+"日",31,INK,true));b.addView(tx("歴代の今日",14,ACCENT,true));int n=0;for(ArchiveEvent e:events)if(e.date.getMonthValue()==now.getMonthValue()&&e.date.getDayOfMonth()==now.getDayOfMonth()){b.addView(card(e));n++;}if(n==0)b.addView(empty("この日付で確認できた公開記録は、まだ登録されていません。\n「何もなかった」という意味ではありません。"));TextView h=tx("最近の記録",19,INK,true);h.setPadding(0,dp(24),0,0);b.addView(h);for(int i=0;i<Math.min(10,events.size());i++)b.addView(card(events.get(i)));screen(scroll(b));}
+    void calendar(){LinearLayout b=col();b.addView(tx("カレンダー",27,INK,true));b.addView(tx("日付を押すと、その日に確認できた記録を表示します。",13,MUTED,false));CalendarView c=new CalendarView(this);c.setFirstDayOfWeek(2);c.setBackgroundColor(Color.WHITE);b.addView(c,new LinearLayout.LayoutParams(-1,dp(330)));TextView h=tx("",19,INK,true);h.setPadding(0,dp(18),0,0);b.addView(h);LinearLayout out=col();b.addView(out);showDay(LocalDate.now(),h,out);c.setOnDateChangeListener((v,y,m,d)->showDay(LocalDate.of(y,m+1,d),h,out));screen(scroll(b));}
+    void showDay(LocalDate d,TextView h,LinearLayout out){h.setText(d.format(DateTimeFormatter.ofPattern("yyyy年M月d日")));out.removeAllViews();int n=0;for(ArchiveEvent e:events)if(e.date.equals(d)){out.addView(card(e));n++;}if(n==0)out.addView(empty("確認済み記録はありません。\n未確認の情報が存在する可能性があります。"));}
+    void search(){LinearLayout b=col();b.addView(tx("検索",27,INK,true));b.addView(tx("出来事・媒体・人物・タグを横断します。",13,MUTED,false));EditText q=new EditText(this);q.setHint("例：ラジオ / 秋田 / 鈴木瞳美 / 2025");q.setSingleLine();q.setBackground(bg(Color.WHITE,16,LINE));q.setPadding(dp(14),0,dp(14),0);LinearLayout.LayoutParams p=new LinearLayout.LayoutParams(-1,dp(52));p.setMargins(0,dp(12),0,dp(8));b.addView(q,p);TextView count=tx("",12,MUTED,false);b.addView(count);LinearLayout out=col();b.addView(out);results("",out,count);q.addTextChangedListener(new TextWatcher(){public void beforeTextChanged(CharSequence s,int a,int c,int d){}public void onTextChanged(CharSequence s,int a,int c,int d){results(s.toString(),out,count);}public void afterTextChanged(Editable e){}});screen(scroll(b));}
+    void results(String q,LinearLayout out,TextView count){out.removeAllViews();int n=0;for(ArchiveEvent e:events)if(e.matches(q)){if(q.trim().isEmpty()&&n>=12)break;out.addView(card(e));n++;}count.setText(q.trim().isEmpty()?"新しい順に12件":n+"件見つかりました");if(n==0)out.addView(empty("該当する確認済み記録はありません。"));}
+    View card(ArchiveEvent e){LinearLayout c=col();c.setPadding(dp(15),dp(14),dp(15),dp(14));c.setBackground(bg(Color.WHITE,18,LINE));LinearLayout.LayoutParams cp=new LinearLayout.LayoutParams(-1,-2);cp.setMargins(0,dp(9),0,0);c.setLayoutParams(cp);LinearLayout m=new LinearLayout(this);m.setGravity(Gravity.CENTER_VERTICAL);TextView pill=tx(e.type,11,ACCENT,true);pill.setPadding(dp(8),dp(4),dp(8),dp(4));pill.setBackground(bg(SOFT,20,SOFT));m.addView(pill);m.addView(tx("  "+e.date+(e.time.isEmpty()?"":"  "+e.time),12,MUTED,false));c.addView(m);TextView t=tx(e.title,17,INK,true);t.setPadding(0,dp(9),0,dp(3));c.addView(t);if(!e.summary.isEmpty())c.addView(tx(e.summary,14,INK,false));if(!e.tags.isEmpty()){TextView z=tx("#"+String.join("  #",e.tags),12,ACCENT,false);z.setPadding(0,dp(8),0,0);c.addView(z);}TextView s=tx("出典："+e.sourceName+"  ·  "+e.confidence,11,MUTED,false);s.setPadding(0,dp(9),0,0);c.addView(s);if(e.sourceUrl.startsWith("http")){Button o=nb("元の公開ページを開く",v->open(e.sourceUrl));LinearLayout.LayoutParams p=new LinearLayout.LayoutParams(-2,dp(42));p.gravity=Gravity.END;p.setMargins(0,dp(7),0,0);c.addView(o,p);}return c;}
+    View empty(String s){TextView v=tx(s,13,MUTED,false);v.setPadding(dp(15),dp(15),dp(15),dp(15));v.setBackground(bg(Color.WHITE,18,LINE));LinearLayout.LayoutParams p=new LinearLayout.LayoutParams(-1,-2);p.setMargins(0,dp(10),0,dp(8));v.setLayoutParams(p);return v;}
+    void open(String u){try{Uri x=Uri.parse(u);if(!"https".equalsIgnoreCase(x.getScheme())&&!"http".equalsIgnoreCase(x.getScheme()))return;startActivity(new Intent(Intent.ACTION_VIEW,x));}catch(Exception ignored){Toast.makeText(this,"ページを開けませんでした",Toast.LENGTH_SHORT).show();}}
+    LinearLayout col(){LinearLayout l=new LinearLayout(this);l.setOrientation(LinearLayout.VERTICAL);l.setBackgroundColor(PAPER);return l;} ScrollView scroll(View v){ScrollView s=new ScrollView(this);s.setFillViewport(true);s.addView(v,new ScrollView.LayoutParams(-1,-2));return s;} void screen(View v){content.removeAllViews();content.addView(v,new FrameLayout.LayoutParams(-1,-1));} TextView tx(String s,int z,int c,boolean b){TextView v=new TextView(this);v.setText(s);v.setTextSize(z);v.setTextColor(c);if(b)v.setTypeface(Typeface.DEFAULT,Typeface.BOLD);return v;} GradientDrawable bg(int f,int r,int st){GradientDrawable d=new GradientDrawable();d.setColor(f);d.setCornerRadius(dp(r));d.setStroke(dp(1),st);return d;} int dp(int v){return Math.round(v*getResources().getDisplayMetrics().density);}
+}
