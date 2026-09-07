@@ -21,9 +21,12 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 public final class ArchiveRepository {
     public interface RefreshCallback { void onRefreshed(List<ArchiveEvent> events, String updatedAt); }
@@ -31,6 +34,7 @@ public final class ArchiveRepository {
     private static final String MANIFEST_URL=REMOTE_ROOT+"manifest.json";
     private static final long REFRESH_INTERVAL_MS=12L*60L*60L*1000L;
     private static final int MAX_FILE_BYTES=5*1024*1024, MAX_TOTAL_BYTES=24*1024*1024, MAX_SHARDS=120;
+    private static final Pattern X_STATUS=Pattern.compile("(?:x|twitter)\\.com/nagata_shiori_/status/(\\d+)",Pattern.CASE_INSENSITIVE);
     private final Context context;
     private final ExecutorService executor=Executors.newSingleThreadExecutor();
     private final Handler main=new Handler(Looper.getMainLooper());
@@ -103,13 +107,36 @@ public final class ArchiveRepository {
         });
     }
 
-    private ArchiveData merge(ArchiveData a,ArchiveData b,String updatedAt){
-        Map<String,ArchiveEvent> map=new LinkedHashMap<>();
-        for(ArchiveEvent e:a.events)map.put(e.id,e);
-        for(ArchiveEvent e:b.events)map.put(e.id,e);
-        List<ArchiveEvent> out=new ArrayList<>(map.values());
+    private ArchiveData merge(ArchiveData seed,ArchiveData remote,String updatedAt){
+        // Seed is the fully backfilled archive bundled with the current APK. Prefer it when an
+        // old remote shard describes the same canonical X status under a legacy record id.
+        Map<String,ArchiveEvent> byCanonical=new LinkedHashMap<>();
+        for(ArchiveEvent e:seed.events)byCanonical.put(canonicalKey(e),e);
+        for(ArchiveEvent e:remote.events){
+            String key=canonicalKey(e);
+            ArchiveEvent old=byCanonical.get(key);
+            if(old==null){
+                byCanonical.put(key,e);
+                continue;
+            }
+            // For ordinary records a matching id may carry an online correction; allow it.
+            // For X, never replace a bundled canonical status with a legacy/profile-only copy.
+            if(!e.isX() && old.id.equals(e.id))byCanonical.put(key,e);
+        }
+        List<ArchiveEvent> out=new ArrayList<>(byCanonical.values());
         Collections.sort(out);
-        return new ArchiveData(out,updatedAt==null||updatedAt.isEmpty()?a.updatedAt:updatedAt);
+        return new ArchiveData(out,updatedAt==null||updatedAt.isEmpty()?seed.updatedAt:updatedAt);
+    }
+
+    private String canonicalKey(ArchiveEvent e){
+        if(e.isX()){
+            Matcher m=X_STATUS.matcher(e.sourceUrl==null?"":e.sourceUrl);
+            if(m.find())return "X:status:"+m.group(1);
+            String time=e.time==null?"":e.time;
+            String excerpt=e.excerpt==null?"":e.excerpt.trim().toLowerCase(Locale.JAPANESE);
+            return "X:time:"+e.date+":"+time+":"+excerpt;
+        }
+        return "ID:"+e.id;
     }
 
     private byte[] toBytes(ArchiveData data)throws Exception{
@@ -154,7 +181,7 @@ public final class ArchiveRepository {
             conn.setConnectTimeout(8000);
             conn.setReadTimeout(8000);
             conn.setInstanceFollowRedirects(true);
-            conn.setRequestProperty("User-Agent","ShioriArchive/0.6 (+public metadata reader)");
+            conn.setRequestProperty("User-Agent","ShioriArchive/0.7 (+public metadata reader)");
             if(conn.getResponseCode()!=200)throw new IllegalStateException("http error");
             try(InputStream in=new BufferedInputStream(conn.getInputStream())){
                 return readAll(in,limit);
