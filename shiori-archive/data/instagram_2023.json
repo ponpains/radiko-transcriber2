@@ -1,8 +1,9 @@
 {
   "schemaVersion": 1,
   "updatedAt": "2026-09-07",
-  "notice": "永田詩央里さん本人の公開Instagram投稿。日時は公開索引で確認。元Instagram URLを確実に確認できない記録は、日時確認に使った公開索引を出典とします。",
+  "notice": "永田詩央里さん本人の公開Instagram投稿。日時は公開ページ・公開索引で確認。確認できない投稿時刻は推測せず空欄にします。",
   "events": [
+    {"id":"ig-CqiGpVjvh3q","date":"2023-04-02","type":"Instagram","title":"公式Instagramを開設し初投稿","summary":"日常や自分の『好き』を発信していきたいとして、個人Instagramをスタートした。","sourceName":"Instagram @nagata__shiori","sourceUrl":"https://www.instagram.com/p/CqiGpVjvh3q/","confidence":"本人公開投稿・投稿日確認／投稿時刻未確認","tags":["Instagram","初投稿","SNS","好き"],"people":[]},
     {"id":"ig-3075745396236877921","date":"2023-04-07","time":"23:24","type":"Instagram","title":"クリームソーダの写真を投稿","summary":"クリームソーダを『好き』として紹介した投稿。","sourceName":"Instagram公開索引（nagata__shiori）","sourceUrl":"https://oversea.instagrammernews.com/detail/3075745396236877921","confidence":"本人公開投稿・公開索引で日時確認","tags":["Instagram","クリームソーダ","食べ物"],"people":[]},
     {"id":"ig-3080801211385892245","date":"2023-04-14","time":"22:49","type":"Instagram","title":"沖縄の空気と強い風を楽しんだ日の写真","summary":"沖縄で強めの風を涼やかで心地よかったと振り返った投稿。","sourceName":"Instagram公開索引（nagata__shiori）","sourceUrl":"https://instagrammernews.com/detail/3080801211385892245","confidence":"本人公開投稿・公開索引で日時確認","tags":["Instagram","沖縄","風","写真"],"people":[]},
     {"id":"ig-3093067390284388946","date":"2023-05-01","time":"20:59","type":"Instagram","title":"対面お話し会の日の一張羅ワンピース","summary":"対面お話し会の日の装いを紹介した投稿。","sourceName":"Instagram公開索引（nagata__shiori）","sourceUrl":"https://instagrammernews.com/detail/3093067390284388946","confidence":"本人公開投稿・公開索引で日時確認","tags":["Instagram","お話し会","ワンピース","衣装"],"people":[]},
