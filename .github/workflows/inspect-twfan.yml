@@ -1,4 +1,4 @@
-name: Inspect archive post markup
+name: Inspect public archive extension routes
 
 on:
   push:
@@ -9,23 +9,44 @@ jobs:
   inspect:
     runs-on: ubuntu-latest
     steps:
-      - name: Inspect raw post markup and robots
+      - name: Test Wayback CDX and X oEmbed
         shell: bash
         run: |
           python3 - <<'PY'
-          import urllib.request, re
-          headers={'User-Agent':'Mozilla/5.0 ShioriArchive/0.7'}
-          for robots in ['https://akbp48.com/robots.txt','https://twfan.net/robots.txt']:
-              try:
-                  r=urllib.request.urlopen(urllib.request.Request(robots,headers=headers),timeout=15).read().decode('utf-8','replace')
-                  print('\nROBOTS',robots,'\n',r[:4000])
-              except Exception as e: print('ROBOTS ERR',robots,repr(e))
-          samples=[
-            ('ark','https://akbp48.com/yoani34/member/%E6%B0%B8%E7%94%B0%E8%A9%A9%E5%A4%AE%E9%87%8C/tweet','1657569391175962625'),
-            ('twfan','https://twfan.net/user/1098230959269281792/old/1','1099638521118175232')]
-          for name,url,sid in samples:
+          import urllib.request, urllib.parse, json, re
+          headers={'User-Agent':'ShioriArchive/0.7 research contact via GitHub'}
+          for url in ['https://web.archive.org/robots.txt','https://publish.twitter.com/robots.txt']:
+            try:
               raw=urllib.request.urlopen(urllib.request.Request(url,headers=headers),timeout=20).read().decode('utf-8','replace')
-              k=raw.find(sid)
-              print('\n===',name,'sid',sid,'index',k,'===')
-              print(raw[max(0,k-1800):k+1800])
+              print('\nROBOTS',url,'\n',raw[:3000])
+            except Exception as e: print('ROBOTS ERR',url,repr(e))
+
+          queries=[
+            'https://web.archive.org/cdx/search/cdx?url=twitter.com/nagata_shiori_/status/*&output=json&filter=statuscode:200&collapse=urlkey&fl=timestamp,original&limit=5000',
+            'https://web.archive.org/cdx/search/cdx?url=x.com/nagata_shiori_/status/*&output=json&filter=statuscode:200&collapse=urlkey&fl=timestamp,original&limit=5000'
+          ]
+          ids=set()
+          for url in queries:
+            try:
+              raw=urllib.request.urlopen(urllib.request.Request(url,headers=headers),timeout=60).read().decode('utf-8','replace')
+              print('\nCDX bytes',len(raw),'prefix',raw[:300])
+              try:
+                rows=json.loads(raw)
+                for row in rows[1:]:
+                  if len(row)>1:
+                    m=re.search(r'/status/(\d{15,22})',row[1])
+                    if m: ids.add(m.group(1))
+                print('rows',max(0,len(rows)-1),'unique ids cumulative',len(ids))
+              except Exception as e: print('CDX JSON ERR',repr(e))
+            except Exception as e: print('CDX ERR',repr(e))
+          print('TOTAL_IDS',len(ids),'sample',sorted(ids,key=int)[:3],sorted(ids,key=int)[-3:] if ids else [])
+
+          samples=['1099638521118175232','1413859487685890053','1657569391175962625']
+          for sid in samples:
+            url='https://publish.twitter.com/oembed?omit_script=1&dnt=1&url='+urllib.parse.quote('https://twitter.com/nagata_shiori_/status/'+sid,safe='')
+            try:
+              raw=urllib.request.urlopen(urllib.request.Request(url,headers=headers),timeout=20).read().decode('utf-8','replace')
+              data=json.loads(raw)
+              print('\nOEMBED',sid,'author',data.get('author_name'),'html',data.get('html','')[:1000])
+            except Exception as e: print('OEMBED ERR',sid,repr(e))
           PY
