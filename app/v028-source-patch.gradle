@@ -1,0 +1,82 @@
+// v0.28: isolate radio-name headers and add long, smooth inertial transcript scrolling.
+tasks.named("preBuild").configure {
+    doLast {
+        File formatter = file("src/main/java/com/example/radikotranscriber/TranscriptSentenceFormatter.java")
+        String f = formatter.getText("UTF-8")
+        String oldFormatterReturn = '''        return result.toString().trim();
+    }
+
+    public static boolean isTopicStarter'''
+        String newFormatterReturn = '''        return RadioMailLayoutV028.apply(result.toString().trim());
+    }
+
+    public static boolean isTopicStarter'''
+        if (!f.contains("RadioMailLayoutV028.apply(result.toString().trim())")) {
+            if (!f.contains(oldFormatterReturn)) throw new GradleException("v0.28: formatter return marker missing")
+            f = f.replace(oldFormatterReturn, newFormatterReturn)
+        }
+        formatter.write(f, "UTF-8")
+
+        File proofreader = file("src/main/java/com/example/radikotranscriber/TranscriptFinalProofreaderV027.java")
+        String p = proofreader.getText("UTF-8")
+        String oldProofReturn = '''        s = KerekereObservedCorrectionsV027.refineTranscript(program, s);
+        return normalize(s);
+    }
+
+    private static String removeLocalReplayResidue'''
+        String newProofReturn = '''        s = KerekereObservedCorrectionsV027.refineTranscript(program, s);
+        return normalize(RadioMailLayoutV028.apply(s));
+    }
+
+    private static String removeLocalReplayResidue'''
+        if (!p.contains("return normalize(RadioMailLayoutV028.apply(s));")) {
+            if (!p.contains(oldProofReturn)) throw new GradleException("v0.28: final proofreader marker missing")
+            p = p.replace(oldProofReturn, newProofReturn)
+        }
+        proofreader.write(p, "UTF-8")
+
+        File main = file("src/main/java/com/example/radikotranscriber/MainActivity.java")
+        String m = main.getText("UTF-8")
+        String oldMainTouch = '''        transcript.setOnTouchListener((v, e) -> {
+            ViewParent p = v.getParent();
+            if (p != null) {
+                int a = e.getActionMasked();
+                if (a == MotionEvent.ACTION_DOWN || a == MotionEvent.ACTION_MOVE) {
+                    p.requestDisallowInterceptTouchEvent(true);
+                } else if (a == MotionEvent.ACTION_UP || a == MotionEvent.ACTION_CANCEL) {
+                    p.requestDisallowInterceptTouchEvent(false);
+                }
+            }
+            return false;
+        });'''
+        if (!m.contains("FastFlingEditTextHelper.attach(transcript);")) {
+            if (!m.contains(oldMainTouch)) throw new GradleException("v0.28: main transcript touch marker missing")
+            m = m.replace(oldMainTouch, '''        FastFlingEditTextHelper.attach(transcript);''')
+        }
+        main.write(m, "UTF-8")
+
+        File detail = file("src/main/java/com/example/radikotranscriber/EpisodeDetailActivity.java")
+        String d = detail.getText("UTF-8")
+        String oldDetailTouch = '''        transcript.setOnTouchListener((v, e) -> {
+            ViewParent p = v.getParent();
+            if (p != null) {
+                int a = e.getActionMasked();
+                if (a == MotionEvent.ACTION_DOWN || a == MotionEvent.ACTION_MOVE) p.requestDisallowInterceptTouchEvent(true);
+                else if (a == MotionEvent.ACTION_UP || a == MotionEvent.ACTION_CANCEL) p.requestDisallowInterceptTouchEvent(false);
+            }
+            return false;
+        });'''
+        if (!d.contains("FastFlingEditTextHelper.attach(transcript);")) {
+            if (!d.contains(oldDetailTouch)) throw new GradleException("v0.28: detail transcript touch marker missing")
+            d = d.replace(oldDetailTouch, '''        FastFlingEditTextHelper.attach(transcript);''')
+        }
+        detail.write(d, "UTF-8")
+
+        File layout = file("src/main/res/layout/activity_main.xml")
+        String x = layout.getText("UTF-8")
+        x = x.replace("v0.27", "v0.28")
+        x = x.replace("再認識安定化 / 再開位置修正 / 局所重複除去 / 検索厳格化",
+                "メール見出し改行 / 長文高速フリック / v0.27安定化を継承")
+        layout.write(x, "UTF-8")
+    }
+}
