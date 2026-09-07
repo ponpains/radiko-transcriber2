@@ -1,4 +1,4 @@
-name: Inspect ArKaiBu archive structure
+name: Inspect archive post markup
 
 on:
   push:
@@ -9,27 +9,23 @@ jobs:
   inspect:
     runs-on: ubuntu-latest
     steps:
-      - name: Inspect ArKaiBu pagination/API
+      - name: Inspect raw post markup and robots
         shell: bash
         run: |
           python3 - <<'PY'
-          import re, urllib.request, html
-          from urllib.parse import unquote
-          url='https://akbp48.com/yoani34/member/%E6%B0%B8%E7%94%B0%E8%A9%A9%E5%A4%AE%E9%87%8C/tweet'
-          req=urllib.request.Request(url,headers={'User-Agent':'Mozilla/5.0 ShioriArchive/0.7'})
-          raw=urllib.request.urlopen(req,timeout=30).read().decode('utf-8',errors='replace')
-          print('bytes',len(raw))
-          status=re.findall(r'https?://(?:twitter|x)\.com/nagata_shiori_/status/(\d+)',raw,re.I)
-          print('status ids',len(status),'unique',len(set(status)),'firstlast',status[:2],status[-2:])
-          links=re.findall(r'href=["\']([^"\']+)["\']',raw,re.I)
-          cand=[]
-          for x in links:
-            y=html.unescape(x)
-            if any(k in y.lower() for k in ['tweet','page','calendar','2023','2022','cursor','more']): cand.append(y)
-          print('candidate links',len(cand))
-          for x in cand[-80:]: print('LINK',unquote(x)[:300])
-          for pat in [r'<script[^>]*src=["\']([^"\']+)',r'<form[^>]+action=["\']([^"\']+)',r'(?:ajax|api|fetch|axios)[^\n]{0,300}',r'(?:page|offset|limit|cursor)[^\n]{0,180}']:
-            vals=re.findall(pat,raw,re.I)
-            print('PAT',pat[:35],len(vals))
-            for v in vals[:30]: print(' ',str(v)[:400])
+          import urllib.request, re
+          headers={'User-Agent':'Mozilla/5.0 ShioriArchive/0.7'}
+          for robots in ['https://akbp48.com/robots.txt','https://twfan.net/robots.txt']:
+              try:
+                  r=urllib.request.urlopen(urllib.request.Request(robots,headers=headers),timeout=15).read().decode('utf-8','replace')
+                  print('\nROBOTS',robots,'\n',r[:4000])
+              except Exception as e: print('ROBOTS ERR',robots,repr(e))
+          samples=[
+            ('ark','https://akbp48.com/yoani34/member/%E6%B0%B8%E7%94%B0%E8%A9%A9%E5%A4%AE%E9%87%8C/tweet','1657569391175962625'),
+            ('twfan','https://twfan.net/user/1098230959269281792/old/1','1099638521118175232')]
+          for name,url,sid in samples:
+              raw=urllib.request.urlopen(urllib.request.Request(url,headers=headers),timeout=20).read().decode('utf-8','replace')
+              k=raw.find(sid)
+              print('\n===',name,'sid',sid,'index',k,'===')
+              print(raw[max(0,k-1800):k+1800])
           PY
