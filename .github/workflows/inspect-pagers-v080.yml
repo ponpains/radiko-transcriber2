@@ -1,0 +1,23 @@
+name: Inspect exact pagers v080
+on:
+  workflow_dispatch:
+  push:
+    branches: ["shiori-archive-mvp"]
+    paths: ['.github/workflows/inspect-pagers-v080.yml']
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - shell: bash
+        run: |
+          python3 - <<'PY'
+          import urllib.request,re
+          UA={'User-Agent':'Mozilla/5.0 ShioriArchive/0.8'}
+          def get(u): return urllib.request.urlopen(urllib.request.Request(u,headers=UA),timeout=30).read().decode('utf8','replace')
+          for u in ['https://not-equal-me.jp/news/1','https://not-equal-me.jp/schedule/','https://not-equal-me.jp/schedule/?year=2019&month=2']:
+            t=get(u); print('\nURL',u,'len',len(t))
+            for pat in [r'maxpage\s*=\s*\d+',r'id="next".{0,500}',r'rel="next".{0,300}',r'href="([^"]*(?:page|schedule|news)[^"]*)"',r'cYear[^<]{0,80}',r'cMonth[^<]{0,80}']:
+              print('PAT',pat)
+              for m in re.finditer(pat,t,re.I|re.S): print(m.group(0)[:900].replace('\n',' '))
+          PY
