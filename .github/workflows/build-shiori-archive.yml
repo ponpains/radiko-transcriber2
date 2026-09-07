@@ -12,11 +12,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Restore project
+      - name: Prepare bundled archive data
         shell: bash
         run: |
-          base64 --decode shiori-archive-project.b64 > shiori-archive-project.zip
-          unzip -o shiori-archive-project.zip
+          mkdir -p shiori-archive/app/src/main/assets
+          cp shiori-archive/data/archive.json shiori-archive/app/src/main/assets/archive_seed.json
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
