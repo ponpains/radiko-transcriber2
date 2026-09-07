@@ -17,6 +17,7 @@ public final class ArchiveEvent implements Comparable<ArchiveEvent> {
     public final String type;
     public final String title;
     public final String summary;
+    public final String excerpt;
     public final String sourceName;
     public final String sourceUrl;
     public final String confidence;
@@ -24,14 +25,15 @@ public final class ArchiveEvent implements Comparable<ArchiveEvent> {
     public final List<String> people;
 
     private ArchiveEvent(String id, LocalDate date, String time, String type, String title,
-                         String summary, String sourceName, String sourceUrl, String confidence,
-                         List<String> tags, List<String> people) {
+                         String summary, String excerpt, String sourceName, String sourceUrl,
+                         String confidence, List<String> tags, List<String> people) {
         this.id = id;
         this.date = date;
         this.time = time;
         this.type = type;
         this.title = title;
         this.summary = summary;
+        this.excerpt = excerpt;
         this.sourceName = sourceName;
         this.sourceUrl = sourceUrl;
         this.confidence = confidence;
@@ -47,8 +49,9 @@ public final class ArchiveEvent implements Comparable<ArchiveEvent> {
                 date,
                 o.optString("time", ""),
                 o.optString("type", "その他"),
-                o.getString("title"),
+                o.optString("title", ""),
                 o.optString("summary", ""),
+                o.optString("excerpt", ""),
                 o.optString("sourceName", "公開情報"),
                 o.optString("sourceUrl", ""),
                 o.optString("confidence", "確認済み"),
@@ -64,10 +67,18 @@ public final class ArchiveEvent implements Comparable<ArchiveEvent> {
         return out;
     }
 
+    public boolean isX() {
+        return "X".equalsIgnoreCase(type);
+    }
+
+    public String bodyText() {
+        return isX() ? excerpt : summary;
+    }
+
     public boolean matches(String rawQuery) {
         String q = rawQuery == null ? "" : rawQuery.trim().toLowerCase(Locale.JAPANESE);
         if (q.isEmpty()) return true;
-        String joined = (date + " " + type + " " + title + " " + summary + " " +
+        String joined = (date + " " + type + " " + title + " " + summary + " " + excerpt + " " +
                 sourceName + " " + String.join(" ", tags) + " " + String.join(" ", people))
                 .toLowerCase(Locale.JAPANESE);
         return joined.contains(q);
