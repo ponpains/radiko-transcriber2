@@ -1,0 +1,41 @@
+name: Inspect sitemaps v080
+on:
+  workflow_dispatch:
+  push:
+    branches: ["shiori-archive-mvp"]
+    paths: ['.github/workflows/inspect-sitemaps-v080.yml']
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - shell: bash
+        run: |
+          python3 - <<'PY'
+          import urllib.request,re
+          UA={'User-Agent':'Mozilla/5.0 ShioriArchive/0.8'}
+          def get(u):
+            try:return urllib.request.urlopen(urllib.request.Request(u,headers=UA),timeout=30).read().decode('utf8','replace')
+            except Exception as e:return 'ERROR '+repr(e)
+          urls=[
+            'https://not-equal-me.jp/sitemap.xml','https://not-equal-me.jp/sitemap_index.xml',
+            'https://www.asahi.co.jp/noimestation_tv/archive/','https://www.asahi.co.jp/robots.txt',
+            'https://radiko.jp/podcast/channels/cf8c3a32-e6a6-44a4-b43a-5d2817b91b6f',
+            'https://instagrammernews.com/user/58749300526?page=1'
+          ]
+          for u in urls:
+            t=get(u); print('\n===',u,'bytes',len(t),'===')
+            if t.startswith('ERROR'): print(t); continue
+            if 'sitemap' in u:
+              for pat in [r'https?://[^<\s]+',r'/schedule/detail/\d+',r'/news/detail/\d+']:
+                xs=re.findall(pat,t,re.I); print(pat,'count',len(xs),'sample',xs[:30])
+            elif 'noimestation' in u:
+              xs=sorted(set(re.findall(r'href=["\']([^"\']+\.html)',t,re.I)))
+              print('html links',len(xs),xs[:100])
+            elif 'radiko' in u:
+              xs=sorted(set(re.findall(r'/podcast/episodes/[0-9a-f-]{30,}',t,re.I)))
+              print('episode links',len(xs),xs[:80])
+            elif 'instagrammernews' in u:
+              ds=re.findall(r'/detail/(\d+)',t); print('details',len(set(ds)),list(dict.fromkeys(ds))[:30])
+              nxt=re.findall(r'href=["\']([^"\']*page=\d+)["\']',t,re.I); print('pagers',nxt[:20])
+          PY
