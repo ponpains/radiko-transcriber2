@@ -18,6 +18,7 @@ jobs:
           mkdir -p shiori-archive/app/src/main/assets
           python3 - <<'PY'
           import hashlib, html as htmllib, json, re, urllib.request
+          from datetime import datetime, timezone, timedelta
           from pathlib import Path
 
           base = Path('shiori-archive/data')
@@ -38,7 +39,7 @@ jobs:
           try:
               req = urllib.request.Request(
                   'https://raw.githubusercontent.com/nagata-shiohigari/shiorin/main/index.html',
-                  headers={'User-Agent': 'ShioriArchive-build/0.4 (+public metadata indexer)'}
+                  headers={'User-Agent': 'ShioriArchive-build/0.5 (+public metadata indexer)'}
               )
               raw = urllib.request.urlopen(req, timeout=15).read().decode('utf-8', errors='replace')
               section_labels = {
@@ -94,15 +95,99 @@ jobs:
           except Exception as e:
               print('secondary index generation skipped:', repr(e))
 
+          # Recent X backfill. We store metadata and an original-post link rather than copying post text.
+          # Twitter/X snowflake IDs contain the post timestamp, so dates/times do not depend on mirror labels.
+          X_EPOCH_MS = 1288834974657
+          JST = timezone(timedelta(hours=9))
+          existing_urls = {str(e.get('sourceUrl','')).split('?')[0] for e in merged.values()}
+          x_ids = set()
+          fallback_ids = {
+              '2089705246159495323', # 2026-08-18
+              '2091145287582773654', # 2026-08-22
+              '2091155599409201244', # 2026-08-22
+              '2091503711587844256', # 2026-08-23
+              '2094013097799541111', # 2026-08-30
+              '2095278673507303712', # 2026-09-03
+          }
+          x_ids.update(fallback_ids)
+          mirrors = [
+              'https://www.sotwe.com/nagata_shiori_',
+              'https://twstalker.com/nagata_shiori_',
+          ]
+          status_patterns = [
+              re.compile(r'(?:https?://(?:x|twitter)\.com/)?nagata_shiori_/status/(\d{15,22})', re.I),
+              re.compile(r'nagata_shiori_%2Fstatus%2F(\d{15,22})', re.I),
+              re.compile(r'nagata_shiori_\\/status\\/(\d{15,22})', re.I),
+          ]
+          for mirror in mirrors:
+              stagnant = 0
+              for page in range(1, 13):
+                  url = mirror if page == 1 else f'{mirror}?page={page}'
+                  try:
+                      req = urllib.request.Request(url, headers={'User-Agent':'Mozilla/5.0 ShioriArchive/0.5'})
+                      text = urllib.request.urlopen(req, timeout=12).read().decode('utf-8', errors='replace')
+                      before = len(x_ids)
+                      for pat in status_patterns:
+                          x_ids.update(pat.findall(text))
+                      if len(x_ids) == before:
+                          stagnant += 1
+                      else:
+                          stagnant = 0
+                      if page >= 3 and stagnant >= 2:
+                          break
+                  except Exception as e:
+                      print('x mirror page skipped:', url, repr(e))
+                      break
+
+          generated_x = 0
+          latest_x = None
+          now_jst = datetime.now(JST)
+          for sid in sorted(x_ids, key=int):
+              try:
+                  created_ms = (int(sid) >> 22) + X_EPOCH_MS
+                  dt = datetime.fromtimestamp(created_ms / 1000, tz=timezone.utc).astimezone(JST)
+              except Exception:
+                  continue
+              if dt.year < 2019 or dt > now_jst + timedelta(days=1):
+                  continue
+              source_url = f'https://x.com/nagata_shiori_/status/{sid}'
+              if source_url in existing_urls:
+                  continue
+              event_id = f'x-live-{sid}'
+              if event_id in merged:
+                  continue
+              date = dt.strftime('%Y-%m-%d')
+              tm = dt.strftime('%H:%M')
+              merged[event_id] = {
+                  'id': event_id,
+                  'date': date,
+                  'time': tm,
+                  'type': 'X',
+                  'title': 'X投稿',
+                  'summary': '本人Xアカウントの公開投稿。本文・画像は元投稿リンクから確認できます。',
+                  'sourceName': '永田詩央里 公式X',
+                  'sourceUrl': source_url,
+                  'confidence': '本人X投稿URL',
+                  'tags': ['X','本人投稿'],
+                  'people': []
+              }
+              existing_urls.add(source_url)
+              generated_x += 1
+              if latest_x is None or dt > latest_x:
+                  latest_x = dt
+
           output = {
               'schemaVersion': 1,
-              'updatedAt': manifest.get('updatedAt', ''),
-              'notice': '公開・適法に確認できる情報の日時、短い要約、タグ、出典URLを収録。二次索引はその旨を明示。記録なしは活動なしを意味しません。',
+              'updatedAt': datetime.now(JST).strftime('%Y-%m-%d %H:%M'),
+              'notice': '公開・適法に確認できる情報の日時、短い要約、タグ、出典URLを収録。二次索引はその旨を明示。記録なしは活動なしを意味しません。X投稿は本文を複製せず、日時と元投稿リンクを収録します。',
               'events': list(merged.values()),
           }
           out = Path('shiori-archive/app/src/main/assets/archive_seed.json')
           out.write_text(json.dumps(output, ensure_ascii=False, indent=2), encoding='utf-8')
           print(f'generated secondary dated facts: {generated}')
+          print(f'found x status ids: {len(x_ids)}')
+          print(f'generated x metadata: {generated_x}')
+          print('latest x metadata:', latest_x.isoformat() if latest_x else 'none')
           print(f'bundled events: {len(merged)}')
           PY
 
@@ -147,5 +232,5 @@ jobs:
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: shiori-archive-v0.4.0-apk
+          name: shiori-archive-v0.5.0-apk
           path: shiori-archive/app/build/outputs/apk/debug/app-debug.apk
