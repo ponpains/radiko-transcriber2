@@ -1,0 +1,83 @@
+name: Build Shiori Archive v0.9.3 fast
+on:
+  workflow_dispatch:
+  push:
+    branches: ["shiori-archive-mvp"]
+    paths: ['.github/workflows/build-shiori-v093-fast.yml','shiori-archive/scripts/backfill_x_talk_v093.py','shiori-archive/scripts/wayback_direct_merge_v093.py']
+permissions:
+  contents: read
+  actions: read
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Restore v0.9.2 seed
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          curl -fL -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" -H "X-GitHub-Api-Version: 2022-11-28" "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/artifacts/10051091513/zip" -o v092.zip
+          unzip -q v092.zip -d v092
+          APK=$(find v092 -type f -name 'shiori-archive-v0.9.2.apk' | head -1)
+          test -s "$APK"
+          mkdir -p shiori-archive/app/src/main/assets
+          unzip -p "$APK" assets/archive_seed.json > shiori-archive/app/src/main/assets/archive_seed.json
+      - name: Talk archive X backfill
+        run: python3 shiori-archive/scripts/backfill_x_talk_v093.py
+      - name: Merge direct Wayback status URLs
+        run: python3 shiori-archive/scripts/wayback_direct_merge_v093.py
+      - name: Produce final report
+        run: |
+          python3 - <<'PY'
+          import json,re,collections
+          p='shiori-archive/app/src/main/assets/archive_seed.json'; d=json.load(open(p,encoding='utf-8')); ev=d['events'];x=[e for e in ev if e.get('type')=='X']
+          direct=[]; content=[]
+          for e in x:
+            m=re.fullmatch(r'https://x\.com/nagata_shiori_/status/(\d+)',e.get('sourceUrl','') or '')
+            if m: direct.append(m.group(1))
+            elif str(e.get('id','')).startswith('x-quoted-') and (e.get('excerpt') or '').strip(): content.append(e)
+            else: raise SystemExit('invalid X record: '+str(e))
+          assert len(direct)==len(set(direct))
+          rep={'version':'0.9.3','total_events':len(ev),'x_records':len(x),'x_direct_status':len(direct),'x_content_only':len(content),'x_with_excerpt':sum(bool((e.get('excerpt') or '').strip()) for e in x),'x_by_year':dict(sorted(collections.Counter(e.get('date','')[:4] for e in x).items())),'coverage_vs_5100':round(len(x)/5100,4)}
+          json.dump(rep,open('shiori-archive/app/src/main/assets/archive_v093_report.json','w',encoding='utf-8'),ensure_ascii=False,indent=2); print(json.dumps(rep,ensure_ascii=False,indent=2))
+          PY
+      - name: Set labels, version and freeze snapshot
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          p=Path('shiori-archive/app/build.gradle');s=p.read_text();s=re.sub(r'versionCode\s+\d+','versionCode 16',s);s=re.sub(r'versionName\s+"[^"]+"','versionName "0.9.3"',s);p.write_text(s)
+          m=Path('shiori-archive/app/src/main/java/com/ponpains/shioriarchive/MainActivity.java');s=m.read_text()
+          old='TextView source=tx(e.isX()?"元投稿 ↗":"出典 ↗",10,ACCENT,true);'
+          new='boolean directX=e.isX() && e.sourceUrl.matches("https?://x\\\\.com/nagata_shiori_/status/\\\\d+");\n            TextView source=tx(directX?"元投稿 ↗":"出典 ↗",10,ACCENT,true);'
+          if old in s:s=s.replace(old,new)
+          m.write_text(s)
+          r=Path('shiori-archive/app/src/main/java/com/ponpains/shioriarchive/ArchiveRepository.java');t=r.read_text();t=t.replace('shiori-archive/data/','shiori-archive/stop/').replace('ShioriArchive/0.9.2','ShioriArchive/0.9.3').replace('ShioriArchive/0.9.1','ShioriArchive/0.9.3').replace('ShioriArchive/0.9','ShioriArchive/0.9.3').replace('ShioriArchive/0.8','ShioriArchive/0.9.3');r.write_text(t)
+          PY
+      - uses: actions/setup-java@v4
+        with: {distribution: temurin, java-version: '17'}
+      - uses: gradle/actions/setup-gradle@v4
+        with: {gradle-version: '8.10.2'}
+      - name: Restore signing key
+        run: |
+          python3 - <<'PY'
+          import base64,pathlib
+          text=pathlib.Path('.github/workflows/build-apk.yml').read_text();line=next(x.strip() for x in text.splitlines() if x.strip().startswith("echo '") and 'base64 --decode > debug.keystore' in x);payload=line.split("echo '",1)[1].split("' | base64",1)[0];pathlib.Path('shiori-archive/debug.keystore').write_bytes(base64.b64decode(payload))
+          PY
+          test "$(sha256sum shiori-archive/debug.keystore | awk '{print $1}')" = "61cf96e814e00aa9238125a6b533cedfd476c8790e401c77167dc9e4d8d06664"
+      - name: Build APK
+        run: gradle -p shiori-archive :app:assembleDebug
+      - name: Verify APK
+        run: |
+          APK=shiori-archive/app/build/outputs/apk/debug/app-debug.apk; test -s "$APK"
+          AAPT=$(find "$ANDROID_HOME/build-tools" -type f -name aapt | sort -V | tail -1); APKSIGNER=$(find "$ANDROID_HOME/build-tools" -type f -name apksigner | sort -V | tail -1)
+          "$APKSIGNER" verify --verbose --print-certs "$APK"; "$AAPT" dump badging "$APK" | head -5
+          cp "$APK" shiori-archive-v0.9.3.apk; sha256sum shiori-archive-v0.9.3.apk > shiori-archive-v0.9.3.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: shiori-archive-v0.9.3-fast
+          path: |
+            shiori-archive-v0.9.3.apk
+            shiori-archive/app/src/main/assets/archive_v093_report.json
+            shiori-archive-v0.9.3.sha256
