@@ -1,0 +1,250 @@
+// v0.29: make selective re-recognition return usable results and reject destructive corrections.
+tasks.named("preBuild").configure {
+    doLast {
+        File rrFile = file("src/main/java/com/example/radikotranscriber/SelectiveRerecognitionEngineV026.java")
+        String r = rrFile.getText("UTF-8")
+
+        r = r.replace("selective-rerecognition-v027-2026-09-06", "selective-rerecognition-v029-2026-09-08")
+
+        if (!r.contains("READY_SETTLE_MS")) {
+            String marker = '''    private static final double FEED_RATE = 1.05;
+'''
+            if (!r.contains(marker)) throw new GradleException("v0.29: rerecognition constants marker missing")
+            r = r.replace(marker, '''    private static final double FEED_RATE = 1.05;
+    private static final long READY_SETTLE_MS = 180L;
+    private static final long END_SILENCE_MS = 900L;
+    private static final long EMPTY_RESULT_GRACE_MS = 900L;
+''')
+        }
+
+        if (!r.contains("deferredSegmentResults")) {
+            String marker = '''        Runnable timeout;
+        boolean finishedCurrent;
+'''
+            if (!r.contains(marker)) throw new GradleException("v0.29: rerecognition state marker missing")
+            r = r.replace(marker, '''        Runnable timeout;
+        Runnable emptyResultGrace;
+        boolean finishedCurrent;
+        boolean readyCurrent;
+        boolean feedStarted;
+        Bundle deferredSegmentResults;
+''')
+        }
+
+        if (!r.contains("readyCurrent = false;")) {
+            String marker = '''            attempted++;
+            finishedCurrent = false;
+            try {'''
+            if (!r.contains(marker)) throw new GradleException("v0.29: rerecognition reset marker missing")
+            r = r.replace(marker, '''            attempted++;
+            finishedCurrent = false;
+            readyCurrent = false;
+            feedStarted = false;
+            deferredSegmentResults = null;
+            try {''')
+        }
+
+        if (!r.contains("EXTRA_SEGMENTED_SESSION")) {
+            String marker = '''                ri.putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE, readFd);
+'''
+            if (!r.contains(marker)) throw new GradleException("v0.29: audio source marker missing")
+            r = r.replace(marker, '''                ri.putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE, readFd);
+                // With an external ParcelFileDescriptor, segmented-session mode makes EOF the
+                // explicit end of this short re-recognition session instead of relying on mic VAD.
+                ri.putExtra(RecognizerIntent.EXTRA_SEGMENTED_SESSION, RecognizerIntent.EXTRA_AUDIO_SOURCE);
+''')
+        }
+
+        String oldListener = '''                @Override public void onReadyForSpeech(Bundle params) { feedRange(s); }
+                @Override public void onBeginningOfSpeech() {}
+                @Override public void onRmsChanged(float rmsdB) {}
+                @Override public void onBufferReceived(byte[] buffer) {}
+                @Override public void onEndOfSpeech() {}
+                @Override public void onError(int error) { finishOne(s, null, "error_" + error); }
+                @Override public void onResults(Bundle results) {
+                    if (hasUsableResults(results)) finishOne(s, results, "results");
+                    else finishOne(s, null, "results_empty");
+                }
+                @Override public void onPartialResults(Bundle partialResults) {}
+                @Override public void onEvent(int eventType, Bundle params) {}
+                @Override public void onSegmentResults(Bundle segmentResults) {
+                    if (hasUsableResults(segmentResults)) finishOne(s, segmentResults, "segment");
+                    else if (logger != null) logger.log("rerecognition_segment_ignored",
+                            "segmentId=" + s.segmentId + ";reason=no_usable_results");
+                }
+                @Override public void onEndOfSegmentedSession() {}'''
+        if (!r.contains("rerecognition_ready") && r.contains(oldListener)) {
+            String newListener = '''                @Override public void onReadyForSpeech(Bundle params) {
+                    readyCurrent = true;
+                    if (logger != null) logger.log("rerecognition_ready", "segmentId=" + s.segmentId);
+                    // Give the provider a brief moment to attach to the supplied pipe before PCM.
+                    main.postDelayed(() -> {
+                        if (!finishedCurrent && readyCurrent && !feedStarted) {
+                            feedStarted = true;
+                            feedRange(s);
+                        }
+                    }, READY_SETTLE_MS);
+                }
+                @Override public void onBeginningOfSpeech() {}
+                @Override public void onRmsChanged(float rmsdB) {}
+                @Override public void onBufferReceived(byte[] buffer) {}
+                @Override public void onEndOfSpeech() {}
+                @Override public void onError(int error) {
+                    // ERROR_NO_MATCH can race the final segment callback when using external audio.
+                    if (error == SpeechRecognizer.ERROR_NO_MATCH) scheduleEmptyFinish(s, "error_7");
+                    else finishOne(s, null, "error_" + error);
+                }
+                @Override public void onResults(Bundle results) {
+                    if (hasUsableResults(results)) finishOne(s, results, "results");
+                    else scheduleEmptyFinish(s, "results_empty");
+                }
+                @Override public void onPartialResults(Bundle partialResults) {}
+                @Override public void onEvent(int eventType, Bundle params) {}
+                @Override public void onSegmentResults(Bundle segmentResults) {
+                    if (hasUsableResults(segmentResults)) {
+                        deferredSegmentResults = segmentResults;
+                        if (logger != null) logger.log("rerecognition_segment_buffered",
+                                "segmentId=" + s.segmentId + ";usable=true");
+                    } else if (logger != null) {
+                        logger.log("rerecognition_segment_ignored",
+                                "segmentId=" + s.segmentId + ";reason=no_usable_results");
+                    }
+                }
+                @Override public void onEndOfSegmentedSession() {
+                    if (hasUsableResults(deferredSegmentResults))
+                        finishOne(s, deferredSegmentResults, "segment_final");
+                    else scheduleEmptyFinish(s, "segment_end_empty");
+                }'''
+            r = r.replace(oldListener, newListener)
+        }
+
+        if (!r.contains("void scheduleEmptyFinish")) {
+            String marker = '''        boolean hasUsableResults(Bundle results) {
+'''
+            if (!r.contains(marker)) throw new GradleException("v0.29: usable-result marker missing")
+            r = r.replace(marker, '''        void scheduleEmptyFinish(final Suspect s, final String source) {
+            if (finishedCurrent) return;
+            if (hasUsableResults(deferredSegmentResults)) {
+                finishOne(s, deferredSegmentResults, source + "_segment_fallback");
+                return;
+            }
+            if (emptyResultGrace != null) main.removeCallbacks(emptyResultGrace);
+            emptyResultGrace = () -> {
+                emptyResultGrace = null;
+                if (finishedCurrent) return;
+                if (hasUsableResults(deferredSegmentResults))
+                    finishOne(s, deferredSegmentResults, source + "_late_segment");
+                else finishOne(s, null, source);
+            };
+            main.postDelayed(emptyResultGrace, EMPTY_RESULT_GRACE_MS);
+        }
+
+        boolean hasUsableResults(Bundle results) {
+''')
+        }
+
+        String oldSilence = '''                    if (!finishedCurrent) {
+                        byte[] silence = new byte[(int)bytesForMs(280L)];
+                        target.write(silence);
+                        target.flush();
+                    }'''
+        if (!r.contains("END_SILENCE_MS") || r.contains(oldSilence)) {
+            if (!r.contains(oldSilence)) throw new GradleException("v0.29: end silence marker missing")
+            r = r.replace(oldSilence, '''                    if (!finishedCurrent) {
+                        // Feed terminal silence at approximately real time. Dumping it instantly can
+                        // cause the provider to close with an empty result before endpointing.
+                        long silenceRemain = bytesForMs(END_SILENCE_MS);
+                        byte[] silence = new byte[3200]; // 100 ms PCM16 mono @ 16 kHz
+                        while (silenceRemain > 0 && !finishedCurrent) {
+                            int n = (int)Math.min(silence.length, silenceRemain);
+                            target.write(silence, 0, n);
+                            silenceRemain -= n;
+                            if (silenceRemain > 0) Thread.sleep(95L);
+                        }
+                        target.flush();
+                        if (logger != null) logger.log("rerecognition_feed_complete",
+                                "segmentId=" + s.segmentId + ";terminalSilenceMs=" + END_SILENCE_MS);
+                    }''')
+        }
+
+        if (!r.contains("coldOpenFallback(s)")) {
+            String marker = '''            } else if (logger != null) {
+                logger.log("rerecognition_result", "segmentId=" + s.segmentId + ";source=" + source + ";accepted=false");
+            }
+
+            if (accepted) {'''
+            if (!r.contains(marker)) throw new GradleException("v0.29: rerecognition fallback marker missing")
+            r = r.replace(marker, '''            } else {
+                String fallback = coldOpenFallback(s);
+                if (!fallback.isEmpty()) {
+                    chosen = fallback;
+                    accepted = true;
+                    if (logger != null) logger.log("rerecognition_fixed_fallback",
+                            "segmentId=" + s.segmentId + ";source=" + source + ";text=" + brief(chosen));
+                } else if (logger != null) {
+                    logger.log("rerecognition_result", "segmentId=" + s.segmentId + ";source=" + source + ";accepted=false");
+                }
+            }
+
+            if (accepted) {''')
+
+            String methodMarker = '''        void cleanup() {
+'''
+            if (!r.contains(methodMarker)) throw new GradleException("v0.29: cleanup marker missing")
+            r = r.replace(methodMarker, '''        String coldOpenFallback(Suspect s) {
+            if (s == null || s.state != KerekereCandidateDecisionEngine.State.COLD_OPEN) return "";
+            if (!(s.reason.contains("cold_open_identity") || s.reason.contains("known_bad_form"))) return "";
+            String original = safe(s.original).trim();
+            if (original.length() < 4 || original.length() > 140) return "";
+            if (!(original.startsWith("こんばんは") || original.startsWith("今晩"))) return "";
+
+            String fixed = KerekereFixedTemplate.refineSegment(program, "", original);
+            if (!fixed.equals(original) && fixed.contains("永田詩央里")) return fixed;
+
+            // If ハタハタ was missed completely, replace only the broken host-ID prefix and keep
+            // all following episode-specific talk intact.
+            int desu = original.indexOf("です");
+            if (desu < 0 || desu > 42) return "";
+            String tail = original.substring(desu + 2).trim();
+            return KerekereFixedTemplate.COLD_OPEN_1 + (tail.isEmpty() ? "" : " " + tail);
+        }
+
+        void cleanup() {
+''')
+        }
+
+        if (!r.contains("emptyResultGrace = null")) {
+            // state field insertion failed unexpectedly
+            throw new GradleException("v0.29: grace state missing")
+        }
+        String cleanupMarker = '''        void cleanup() {
+            if (timeout != null) { main.removeCallbacks(timeout); timeout = null; }'''
+        if (r.contains(cleanupMarker) && !r.contains("main.removeCallbacks(emptyResultGrace)")) {
+            r = r.replace(cleanupMarker, '''        void cleanup() {
+            if (timeout != null) { main.removeCallbacks(timeout); timeout = null; }
+            if (emptyResultGrace != null) { main.removeCallbacks(emptyResultGrace); emptyResultGrace = null; }''')
+        }
+        rrFile.write(r, "UTF-8")
+
+        File contextFile = file("src/main/java/com/example/radikotranscriber/ContextCorrectionEngine.java")
+        String c = contextFile.getText("UTF-8")
+        if (!c.contains("CorrectionSafetyV029.choose(segment")) {
+            String marker = '''        return cleanupSpacing(s);
+    }
+'''
+            if (!c.contains(marker)) throw new GradleException("v0.29: correction return marker missing")
+            c = c.replace(marker, '''        String cleaned = cleanupSpacing(s);
+        return CorrectionSafetyV029.choose(segment, cleaned, program);
+    }
+''')
+        }
+        contextFile.write(c, "UTF-8")
+
+        File layout = file("src/main/res/layout/activity_main.xml")
+        String x = layout.getText("UTF-8")
+        x = x.replace("v0.28", "v0.29")
+        x = x.replace("メール見出し改行 / 長文高速フリック / v0.27安定化を継承",
+                "再認識結果修正 / 補正悪化ガード / COLD_OPEN安全化")
+        layout.write(x, "UTF-8")
+    }
+}
