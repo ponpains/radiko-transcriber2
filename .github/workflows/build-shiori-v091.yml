@@ -1,0 +1,67 @@
+name: Build Shiori Archive v0.9.1
+on:
+  workflow_dispatch:
+  push:
+    branches: ["shiori-archive-mvp"]
+    paths: ['.github/workflows/build-shiori-v091.yml','shiori-archive/scripts/expand_x_syndication_v091.py']
+permissions:
+  contents: read
+  actions: read
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Restore v0.9.0 cleaned seed
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          curl -fL -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" -H "X-GitHub-Api-Version: 2022-11-28" "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/artifacts/10042613231/zip" -o v090.zip
+          unzip -q v090.zip -d v090
+          APK=$(find v090 -type f -name 'shiori-archive-v0.9.0.apk' | head -1)
+          test -s "$APK"
+          mkdir -p shiori-archive/app/src/main/assets
+          unzip -p "$APK" assets/archive_seed.json > shiori-archive/app/src/main/assets/archive_seed.json
+      - name: Add X official syndication posts
+        run: |
+          python3 shiori-archive/scripts/expand_x_syndication_v091.py
+          cat shiori-archive/app/src/main/assets/archive_v091_report.json
+      - name: Set version and freeze snapshot
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          p=Path('shiori-archive/app/build.gradle');s=p.read_text();s=re.sub(r'versionCode\s+\d+','versionCode 14',s);s=re.sub(r'versionName\s+"[^"]+"','versionName "0.9.1"',s);p.write_text(s)
+          r=Path('shiori-archive/app/src/main/java/com/ponpains/shioriarchive/ArchiveRepository.java');t=r.read_text();t=t.replace('shiori-archive/data/','shiori-archive/stop/').replace('ShioriArchive/0.9','ShioriArchive/0.9.1').replace('ShioriArchive/0.8','ShioriArchive/0.9.1');r.write_text(t)
+          PY
+      - uses: actions/setup-java@v4
+        with: {distribution: temurin, java-version: '17'}
+      - uses: gradle/actions/setup-gradle@v4
+        with: {gradle-version: '8.10.2'}
+      - name: Restore signing key
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import base64,pathlib
+          text=pathlib.Path('.github/workflows/build-apk.yml').read_text();line=next(x.strip() for x in text.splitlines() if x.strip().startswith("echo '") and 'base64 --decode > debug.keystore' in x);payload=line.split("echo '",1)[1].split("' | base64",1)[0];pathlib.Path('shiori-archive/debug.keystore').write_bytes(base64.b64decode(payload))
+          PY
+          test "$(sha256sum shiori-archive/debug.keystore | awk '{print $1}')" = "61cf96e814e00aa9238125a6b533cedfd476c8790e401c77167dc9e4d8d06664"
+      - name: Build APK
+        run: gradle -p shiori-archive :app:assembleDebug
+      - name: Verify APK
+        shell: bash
+        run: |
+          APK=shiori-archive/app/build/outputs/apk/debug/app-debug.apk; test -s "$APK"
+          AAPT=$(find "$ANDROID_HOME/build-tools" -type f -name aapt | sort -V | tail -1); APKSIGNER=$(find "$ANDROID_HOME/build-tools" -type f -name apksigner | sort -V | tail -1)
+          "$APKSIGNER" verify --verbose --print-certs "$APK"; "$AAPT" dump badging "$APK" | head -5
+          cp "$APK" shiori-archive-v0.9.1.apk; sha256sum shiori-archive-v0.9.1.apk > shiori-archive-v0.9.1.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: shiori-archive-v0.9.1
+          path: |
+            shiori-archive-v0.9.1.apk
+            shiori-archive/app/src/main/assets/archive_v091_report.json
+            shiori-archive-v0.9.1.sha256
