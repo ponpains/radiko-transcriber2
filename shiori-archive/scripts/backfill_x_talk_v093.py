@@ -18,10 +18,10 @@ UA='Mozilla/5.0 ShioriArchive/0.9.3 (+public-archive-backfill)'
 XURL_RE=re.compile(r'https?://(?:www\.)?(?:x|twitter)\.com/nagata_shiori_/(?:status|statuses)/(\d+)(?:\?[^\s<]*)?',re.I)
 
 START_THREAD='https://talk.jp/boards/idol/1783248071'  # ≠ME★235, archived/public
-MAX_THREADS=150
+MAX_THREADS=120
 
 
-def request(url,timeout=35,retries=4):
+def request(url,timeout=15,retries=2):
     last=None
     for i in range(retries):
         try:
@@ -31,13 +31,13 @@ def request(url,timeout=35,retries=4):
         except urllib.error.HTTPError as e:
             last=e
             if e.code in (429,503):
-                wait=min(15*(2**i),120)
+                wait=min(10*(2**i),45)
                 time.sleep(wait)
                 continue
             break
         except Exception as e:
             last=e
-            time.sleep(min(5*(i+1),20))
+            time.sleep(min(3*(i+1),8))
     raise last
 
 
@@ -120,12 +120,10 @@ def add_idless(events,text,dt,thread_url,rep):
     if len(norm(text))<3:return
     date=dt.strftime('%Y-%m-%d'); tm=dt.strftime('%H:%M')
     n=norm(text)
-    # Prefer an already-known status record when same-day literal text overlaps.
     for e in events:
         if e.get('type')!='X' or e.get('date')!=date: continue
         en=norm(e.get('excerpt') or e.get('title') or '')
-        if n and en and (n==en or (len(n)>=12 and (n in en or en in n))):
-            return
+        if n and en and (n==en or (len(n)>=12 and (n in en or en in n))): return
     key=f'{date}|{tm}|{n}'
     hid=hashlib.sha1(key.encode('utf-8')).hexdigest()[:16]
     if any(e.get('id')=='x-quoted-'+hid for e in events):return
@@ -135,7 +133,6 @@ def add_idless(events,text,dt,thread_url,rep):
 
 def extract_posts(body,thread_url,events,bysid,rep):
     p=plain(body)
-    # Status-ID backed quotes: find each canonical URL and use the nearest preceding account marker as literal text.
     for m in XURL_RE.finditer(p):
         sid=m.group(1)
         before=p[max(0,m.start()-2500):m.start()]
@@ -143,18 +140,15 @@ def extract_posts(body,thread_url,events,bysid,rep):
         if pos<0: continue
         text=before[pos:]
         text=re.sub(r'^.*?@nagata_shiori_\s*','',text,flags=re.S)
-        # If board chatter leaked in, keep only the last compact block.
         parts=[x.strip() for x in re.split(r'\n\s*\n',text) if x.strip()]
         if parts:text=parts[-1]
         add_status(events,bysid,sid,text,thread_url,rep)
         rep['status_refs_seen']+=1
 
-    # Content-only quotes with explicit X timestamp but no status URL in the block.
     marker='@nagata_shiori_'
     starts=[m.start() for m in re.finditer(re.escape(marker),p)]
     for st in starts:
         block=p[st:st+1800]
-        # stop at next quoted account to avoid merging two tweets
         nxt=block.find(marker,len(marker))
         if nxt>0:block=block[:nxt]
         if XURL_RE.search(block):continue
@@ -166,13 +160,11 @@ def extract_posts(body,thread_url,events,bysid,rep):
 
 
 def find_prev(body,current_url):
-    # Prefer the explicit 前スレ area.
     m=re.search(r'前スレ.{0,500}?href=["\']([^"\']*/boards/idol/\d+)["\']',body,re.S|re.I)
     if m:
         u=m.group(1)
         if u.startswith('/'):u='https://talk.jp'+u
         if u.startswith('http'):return u.split('?')[0]
-    # Fallback: any Talk idol thread linked near "前スレ" after stripping entities.
     links=re.findall(r'href=["\'](https?://talk\.jp/boards/idol/\d+|/boards/idol/\d+)["\']',body,re.I)
     for u in links:
         if u.startswith('/'):u='https://talk.jp'+u
@@ -195,9 +187,8 @@ def main():
         prev=find_prev(body,url)
         if not prev:break
         url=prev
-        time.sleep(0.55)
+        time.sleep(0.15)
 
-    # Exact duplicate cleanup for content-only records; status-backed wins.
     status_keys=set()
     for e in events:
         if e.get('type')=='X' and XURL_RE.search(e.get('sourceUrl','') or ''):
