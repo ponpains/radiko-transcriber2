@@ -1,4 +1,4 @@
-name: Build Shiori Archive v0.8.0
+name: Build Shiori Archive v0.8.1
 on:
   workflow_dispatch:
   push:
@@ -32,6 +32,39 @@ jobs:
           unzip -p "$APK" assets/archive_seed.json > shiori-archive/app/src/main/assets/archive_seed.json
           test -s shiori-archive/app/src/main/assets/archive_seed.json
 
+      - name: Patch schedule parser for Japanese/detail-header dates
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('shiori-archive/scripts/expand_v080.py')
+          s=p.read_text()
+          old="""    if '永田詩央里' not in text and not all_member_re.search(text) and not broad_group_re.search(title):return None
+    ds=''
+    # Schedule pages usually put event date near the top; choose the first 20xx date in visible page.
+    m=re.search(r'(20\\d{2}[./-]\\d{1,2}[./-]\\d{1,2})',text)
+    if m:ds=norm_date(m.group(1))
+    if not ds:return None
+"""
+          new="""    group_mark=re.search(r'(?:※\\s*≠ME|出演.{0,24}≠ME|≠ME\\s*(?:全員|メンバー)|メンバー全員)',text,re.I)
+    if '永田詩央里' not in text and not all_member_re.search(text) and not broad_group_re.search(title) and not group_mark:return None
+    ds=''
+    # Detail headers are often written as 08.23 SUN.2026. Prefer that event date over dates in the body.
+    hm=re.search(r'(?<!\\d)(\\d{1,2})[./](\\d{1,2})\\s*[A-Z]{3}\\.?\\s*(20\\d{2})',text,re.I)
+    if hm:
+        try:ds=date(int(hm.group(3)),int(hm.group(1)),int(hm.group(2))).isoformat()
+        except:ds=''
+    # Older/current pages also use Japanese dates such as 2026年8月23日.
+    if not ds:
+        m=re.search(r'(20\\d{2}(?:[./-]\\d{1,2}[./-]\\d{1,2}|年\\d{1,2}月\\d{1,2}日?))',text)
+        if m:ds=norm_date(m.group(1))
+    if not ds:return None
+"""
+          if old not in s:
+              raise SystemExit('schedule parser target not found')
+          p.write_text(s.replace(old,new))
+          PY
+
       - name: Sweep remaining public sources
         shell: bash
         run: |
@@ -40,7 +73,7 @@ jobs:
           test -s shiori-archive/app/src/main/assets/archive_v080_report.json
           cat shiori-archive/app/src/main/assets/archive_v080_report.json
 
-      - name: Set v0.8.0 version and freeze bundled snapshot
+      - name: Set v0.8.1 version and freeze bundled snapshot
         shell: bash
         run: |
           python3 - <<'PY'
@@ -48,8 +81,8 @@ jobs:
           import re
           p=Path('shiori-archive/app/build.gradle')
           s=p.read_text()
-          s=re.sub(r'versionCode\s+\d+','versionCode 11',s)
-          s=re.sub(r'versionName\s+"[^"]+"','versionName "0.8.0"',s)
+          s=re.sub(r'versionCode\\s+\\d+','versionCode 12',s)
+          s=re.sub(r'versionName\\s+"[^"]+"','versionName "0.8.1"',s)
           p.write_text(s)
           r=Path('shiori-archive/app/src/main/java/com/ponpains/shioriarchive/ArchiveRepository.java')
           t=r.read_text()
@@ -91,13 +124,13 @@ jobs:
           APKSIGNER=$(find "$ANDROID_HOME/build-tools" -type f -name apksigner | sort -V | tail -1)
           "$APKSIGNER" verify --verbose --print-certs "$APK"
           "$AAPT" dump badging "$APK" | head -5
-          cp "$APK" shiori-archive-v0.8.0.apk
-          sha256sum shiori-archive-v0.8.0.apk > shiori-archive-v0.8.0.sha256
+          cp "$APK" shiori-archive-v0.8.1.apk
+          sha256sum shiori-archive-v0.8.1.apk > shiori-archive-v0.8.1.sha256
 
       - uses: actions/upload-artifact@v4
         with:
-          name: shiori-archive-v0.8.0
+          name: shiori-archive-v0.8.1
           path: |
-            shiori-archive-v0.8.0.apk
+            shiori-archive-v0.8.1.apk
             shiori-archive/app/src/main/assets/archive_v080_report.json
-            shiori-archive-v0.8.0.sha256
+            shiori-archive-v0.8.1.sha256
