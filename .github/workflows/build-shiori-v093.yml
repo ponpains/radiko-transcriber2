@@ -3,14 +3,14 @@ on:
   workflow_dispatch:
   push:
     branches: ["shiori-archive-mvp"]
-    paths: ['.github/workflows/build-shiori-v093.yml','shiori-archive/scripts/deep_x_backfill_v093.py']
+    paths: ['.github/workflows/build-shiori-v093.yml','shiori-archive/scripts/deep_x_backfill_v093.py','shiori-archive/scripts/backfill_x_talk_v093.py']
 permissions:
   contents: read
   actions: read
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - name: Restore v0.9.2 seed
@@ -24,30 +24,53 @@ jobs:
           test -s "$APK"
           mkdir -p shiori-archive/app/src/main/assets
           unzip -p "$APK" assets/archive_seed.json > shiori-archive/app/src/main/assets/archive_seed.json
-      - name: Deep X archive backfill
+      - name: Deep X Wayback backfill
         run: |
           python3 shiori-archive/scripts/deep_x_backfill_v093.py
-          cat shiori-archive/app/src/main/assets/archive_v093_report.json
+          cp shiori-archive/app/src/main/assets/archive_v093_report.json /tmp/wayback_report.json
+          cat /tmp/wayback_report.json
+      - name: Talk archive backfill and content-only fallback
+        run: |
+          python3 shiori-archive/scripts/backfill_x_talk_v093.py
+          python3 - <<'PY'
+          import json
+          p='shiori-archive/app/src/main/assets/archive_v093_report.json'
+          talk=json.load(open(p,encoding='utf-8'))
+          try: way=json.load(open('/tmp/wayback_report.json',encoding='utf-8'))
+          except: way={}
+          talk['wayback_stage']=way
+          json.dump(talk,open(p,'w',encoding='utf-8'),ensure_ascii=False,indent=2)
+          print(json.dumps(talk,ensure_ascii=False,indent=2))
+          PY
       - name: Verify X invariants
         run: |
           python3 - <<'PY'
           import json,re
           d=json.load(open('shiori-archive/app/src/main/assets/archive_seed.json',encoding='utf-8'));x=[e for e in d['events'] if e.get('type')=='X']
-          ids=[]
+          ids=[];content_only=0
           for e in x:
-            m=re.fullmatch(r'https://x\.com/nagata_shiori_/status/(\d+)',e.get('sourceUrl','') or '')
-            assert m,e
-            ids.append(m.group(1))
-          assert len(ids)==len(set(ids))
-          print('STRICT_X_OK',len(ids))
+            u=e.get('sourceUrl','') or ''
+            m=re.fullmatch(r'https://x\.com/nagata_shiori_/status/(\d+)',u)
+            if m: ids.append(m.group(1)); continue
+            assert str(e.get('id','')).startswith('x-quoted-'), e
+            assert (e.get('excerpt') or '').strip(), e
+            assert u.startswith('https://talk.jp/boards/idol/'), e
+            content_only+=1
+          assert len(ids)==len(set(ids)), 'duplicate status IDs remain'
+          print('X_VERIFIED direct=',len(ids),'content_only=',content_only,'total=',len(x))
           PY
-      - name: Set version and freeze snapshot
+      - name: Set labels, version and freeze snapshot
         shell: bash
         run: |
           python3 - <<'PY'
           from pathlib import Path
           import re
           p=Path('shiori-archive/app/build.gradle');s=p.read_text();s=re.sub(r'versionCode\s+\d+','versionCode 16',s);s=re.sub(r'versionName\s+"[^"]+"','versionName "0.9.3"',s);p.write_text(s)
+          m=Path('shiori-archive/app/src/main/java/com/ponpains/shioriarchive/MainActivity.java');s=m.read_text()
+          old='TextView source=tx(e.isX()?"元投稿 ↗":"出典 ↗",10,ACCENT,true);'
+          new='boolean directX=e.isX() && e.sourceUrl.matches("https?://x\\\\.com/nagata_shiori_/status/\\\\d+");\n            TextView source=tx(directX?"元投稿 ↗":"出典 ↗",10,ACCENT,true);'
+          if old in s:s=s.replace(old,new)
+          m.write_text(s)
           r=Path('shiori-archive/app/src/main/java/com/ponpains/shioriarchive/ArchiveRepository.java');t=r.read_text();t=t.replace('shiori-archive/data/','shiori-archive/stop/').replace('ShioriArchive/0.9.2','ShioriArchive/0.9.3').replace('ShioriArchive/0.9.1','ShioriArchive/0.9.3').replace('ShioriArchive/0.9','ShioriArchive/0.9.3').replace('ShioriArchive/0.8','ShioriArchive/0.9.3');r.write_text(t)
           PY
       - uses: actions/setup-java@v4
