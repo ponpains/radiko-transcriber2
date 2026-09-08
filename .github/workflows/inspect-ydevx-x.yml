@@ -1,0 +1,30 @@
+name: Inspect Nagata X CSV coverage
+on:
+  workflow_dispatch:
+  push:
+    branches: ["shiori-archive-mvp"]
+    paths: ['.github/workflows/inspect-ydevx-x.yml']
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Inspect public CSV
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import csv,io,urllib.request,collections
+          u='https://raw.githubusercontent.com/ydevx/udeep/07443a293cf3e360ea030817bbef547d0d18aa9a/sns/dat5/nagata_shiori_.csv'
+          req=urllib.request.Request(u,headers={'User-Agent':'Mozilla/5.0 ShioriArchive/0.9'})
+          data=urllib.request.urlopen(req,timeout=30).read().decode('utf-8-sig','replace')
+          rows=list(csv.DictReader(io.StringIO(data)))
+          years=collections.Counter((r.get('date') or '')[:4] for r in rows)
+          dates=sorted(r.get('date') for r in rows if r.get('date'))
+          ids={r.get('id') for r in rows if (r.get('id') or '').isdigit()}
+          print('BYTES',len(data.encode()))
+          print('ROWS',len(rows),'UNIQUE_IDS',len(ids))
+          print('DATE_MIN',dates[0] if dates else None,'DATE_MAX',dates[-1] if dates else None)
+          print('YEARS',dict(sorted(years.items())))
+          print('FIRST_LAST_IDS',rows[-1].get('id') if rows else None,rows[0].get('id') if rows else None)
+          PY
