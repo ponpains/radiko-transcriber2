@@ -1,0 +1,47 @@
+name: Inspect public X mirror pagination
+on:
+  workflow_dispatch:
+  push:
+    branches: ["shiori-archive-mvp"]
+    paths: ['.github/workflows/inspect-social-mirrors-x.yml']
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Inspect public mirror HTML
+        run: |
+          python3 - <<'PY'
+          import re,urllib.request,urllib.error,html
+          urls=[
+            'https://twstalker.com/nagata_shiori_',
+            'https://www.twstalker.com/nagata_shiori_',
+            'https://site.twstalker.com/nagata_shiori_',
+            'https://ww.twstalker.com/nagata_shiori_',
+            'https://www.sotwe.com/nagata_shiori_',
+            'https://instalker.org/nagata_shiori_'
+          ]
+          ua='Mozilla/5.0 ShioriArchive mirror-inspect/0.1'
+          for u in urls:
+            print('\nURL',u)
+            try:
+              req=urllib.request.Request(u,headers={'User-Agent':ua,'Accept-Language':'ja,en;q=0.8'})
+              with urllib.request.urlopen(req,timeout=30) as r:
+                body=r.read().decode('utf-8','replace');print('STATUS',r.status,'FINAL',r.geturl(),'BYTES',len(body))
+              ids=set(re.findall(r'(?:x|twitter)\.com/nagata_shiori_/(?:status|statuses)/(\d{15,22})',html.unescape(body),re.I))
+              allids=set(re.findall(r'(?:status|tweet|post)[/=_-](\d{15,22})',body,re.I))
+              print('DIRECT_NAGATA_IDS',len(ids),sorted(ids)[-5:] if ids else [])
+              print('GENERIC_ID_LIKE',len(allids))
+              links=re.findall(r'href=["\']([^"\']+)["\']',html.unescape(body),re.I)
+              interesting=[]
+              for x in links:
+                low=x.lower()
+                if any(k in low for k in ['page=','cursor','next','status/','tweet/','post/','max_position','offset']):interesting.append(x)
+              print('INTERESTING_LINKS',interesting[:80])
+              for pat in ['load more','next','cursor','pagination','ajax','api/','timeline']:
+                if pat in body.lower():print('HAS',pat)
+            except Exception as e:print('ERR',repr(e))
+          PY
