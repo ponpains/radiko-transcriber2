@@ -1,0 +1,43 @@
+name: Inspect deeper X CDX coverage
+on:
+  workflow_dispatch:
+  push:
+    branches: ["shiori-archive-mvp"]
+    paths: ['.github/workflows/inspect-x-cdx-v094.yml']
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - name: Count Wayback URL variants
+        run: |
+          python3 - <<'PY'
+          import json,re,time,urllib.parse,urllib.request,urllib.error
+          UA='Mozilla/5.0 ShioriArchive-CDX-inspect'
+          pats=[
+           'twitter.com/nagata_shiori_/status/*','www.twitter.com/nagata_shiori_/status/*','mobile.twitter.com/nagata_shiori_/status/*',
+           'twitter.com/nagata_shiori_/statuses/*','x.com/nagata_shiori_/status/*','www.x.com/nagata_shiori_/status/*',
+           'twitter.com/nagata_shiori_/*','mobile.twitter.com/nagata_shiori_/*','x.com/nagata_shiori_/*'
+          ]
+          def get(p):
+            q=urllib.parse.urlencode({'url':p,'output':'json','fl':'original','filter':'statuscode:200','collapse':'urlkey'})
+            u='https://web.archive.org/cdx/search/cdx?'+q
+            for n in range(4):
+              try:
+                with urllib.request.urlopen(urllib.request.Request(u,headers={'User-Agent':UA}),timeout=60) as r:return json.loads(r.read().decode('utf-8','replace'))
+              except Exception as e:
+                if n==3: print('ERR',p,repr(e));return []
+                time.sleep(6*(n+1))
+          allids=set()
+          for p in pats:
+            d=get(p);rows=d[1:] if len(d)>1 else []
+            ids=set()
+            for row in rows:
+              s=row[0] if row else ''
+              for m in re.finditer(r'nagata_shiori_/(?:status|statuses)/(\d{15,22})',s,re.I):ids.add(m.group(1));allids.add(m.group(1))
+            print('PATTERN',p,'ROWS',len(rows),'STATUS_IDS',len(ids))
+          print('UNION_STATUS_IDS',len(allids))
+          PY
