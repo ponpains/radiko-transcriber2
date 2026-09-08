@@ -12,36 +12,43 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-      - name: Inspect public mirror HTML
+      - name: Inspect Sotwe HTML and scripts
         run: |
           python3 - <<'PY'
-          import re,urllib.request,urllib.error,html
-          urls=[
-            'https://twstalker.com/nagata_shiori_',
-            'https://www.twstalker.com/nagata_shiori_',
-            'https://site.twstalker.com/nagata_shiori_',
-            'https://ww.twstalker.com/nagata_shiori_',
-            'https://www.sotwe.com/nagata_shiori_',
-            'https://instalker.org/nagata_shiori_'
-          ]
-          ua='Mozilla/5.0 ShioriArchive mirror-inspect/0.1'
-          for u in urls:
-            print('\nURL',u)
+          import re,urllib.request,html,json
+          u='https://www.sotwe.com/nagata_shiori_'
+          ua='Mozilla/5.0 ShioriArchive mirror-inspect/0.2'
+          req=urllib.request.Request(u,headers={'User-Agent':ua,'Accept-Language':'ja,en;q=0.8'})
+          with urllib.request.urlopen(req,timeout=30) as r:body=r.read().decode('utf-8','replace')
+          dec=html.unescape(body)
+          print('BYTES',len(body))
+          nums=set(re.findall(r'(?<!\d)(\d{15,22})(?!\d)',dec))
+          print('ALL_LONG_NUMBERS',len(nums),sorted(nums)[-30:])
+          # Print snippets around likely timeline/pagination machinery, keeping log bounded.
+          for term in ['pagination','loadmore','load more','next','timeline','cursor','page=','offset','api/','tweet','post_id','tweet_id','user_id','nagata_shiori_']:
+            hits=[m.start() for m in re.finditer(re.escape(term),dec,re.I)]
+            print('\nTERM',term,'HITS',len(hits))
+            for pos in hits[:8]:
+              s=re.sub(r'\s+',' ',dec[max(0,pos-280):pos+500])
+              print('SNIP',s[:780])
+          scripts=re.findall(r'<script[^>]+src=["\']([^"\']+)["\']',dec,re.I)
+          print('\nSCRIPT_SRCS',scripts)
+          forms=re.findall(r'<form[^>]+action=["\']([^"\']+)["\']',dec,re.I)
+          print('FORM_ACTIONS',forms)
+          # Look for JS endpoints and query templates.
+          endpoints=set(re.findall(r'["\']([^"\']*(?:api|ajax|timeline|tweet|load|page|cursor)[^"\']*)["\']',dec,re.I))
+          print('ENDPOINT_LIKE',sorted(endpoints)[:120])
+          # Fetch local JS assets and grep for endpoint construction.
+          from urllib.parse import urljoin
+          for src in scripts[:12]:
+            su=urljoin(u,src)
             try:
-              req=urllib.request.Request(u,headers={'User-Agent':ua,'Accept-Language':'ja,en;q=0.8'})
-              with urllib.request.urlopen(req,timeout=30) as r:
-                body=r.read().decode('utf-8','replace');print('STATUS',r.status,'FINAL',r.geturl(),'BYTES',len(body))
-              ids=set(re.findall(r'(?:x|twitter)\.com/nagata_shiori_/(?:status|statuses)/(\d{15,22})',html.unescape(body),re.I))
-              allids=set(re.findall(r'(?:status|tweet|post)[/=_-](\d{15,22})',body,re.I))
-              print('DIRECT_NAGATA_IDS',len(ids),sorted(ids)[-5:] if ids else [])
-              print('GENERIC_ID_LIKE',len(allids))
-              links=re.findall(r'href=["\']([^"\']+)["\']',html.unescape(body),re.I)
-              interesting=[]
-              for x in links:
-                low=x.lower()
-                if any(k in low for k in ['page=','cursor','next','status/','tweet/','post/','max_position','offset']):interesting.append(x)
-              print('INTERESTING_LINKS',interesting[:80])
-              for pat in ['load more','next','cursor','pagination','ajax','api/','timeline']:
-                if pat in body.lower():print('HAS',pat)
-            except Exception as e:print('ERR',repr(e))
+              with urllib.request.urlopen(urllib.request.Request(su,headers={'User-Agent':ua}),timeout=25) as rr:js=rr.read().decode('utf-8','replace')
+              print('\nJS',su,'BYTES',len(js))
+              for term in ['cursor','loadMore','pagination','timeline','tweet','api/','offset','page']:
+                hs=[m.start() for m in re.finditer(term,js,re.I)]
+                if hs:
+                  print(' JS_TERM',term,len(hs))
+                  for p in hs[:5]:print('  ',re.sub(r'\s+',' ',js[max(0,p-180):p+380])[:560])
+            except Exception as e:print('JS_ERR',su,repr(e))
           PY
