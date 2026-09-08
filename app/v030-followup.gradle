@@ -1,0 +1,45 @@
+// Small post-patch compatibility pass for v0.30. Keeps the v0.21 transport invariants while
+// retaining the new dictionary/audio-tail protections.
+tasks.named("preBuild").configure {
+    doLast {
+        File serviceFile = file("src/main/java/com/example/radikotranscriber/TranscribeService.java")
+        String s = serviceFile.getText("UTF-8")
+
+        // The field declaration also contains '= 0L', so explicitly verify the per-session reset.
+        String resetNeedle = '''        lastDiagnosticAudioAt = 0L;
+        lastAudibleSpoolBytesV030 = 0L;'''
+        if (!s.contains(resetNeedle)) {
+            String marker = '''        lastDiagnosticAudioAt = 0L;
+'''
+            if (!s.contains(marker)) throw new GradleException("v0.30 followup: reset marker missing")
+            s = s.replace(marker, '''        lastDiagnosticAudioAt = 0L;
+        lastAudibleSpoolBytesV030 = 0L;
+''')
+        }
+
+        // v0.20+ deliberately uses feederReadOffset for drain completion because replay can make the
+        // current feed position differ from the monotonic spoolBytesConsumed diagnostic counter.
+        s = s.replace('''        if (spoolBytesConsumed >= spoolBytesWritten) markDrainComplete();''',
+                '''        if (feederReadOffset >= spoolBytesWritten) markDrainComplete();''')
+
+        // Preserve the transport diagnostics that are useful for spotting replay/checkpoint loss.
+        String oldFinish = '''        diag("capture_finish", "reason=" + reason + ";durationMs=" + frozenDurationMs
+                + ";written=" + spoolBytesWritten + ";consumed=" + spoolBytesConsumed
+                + ";lastAudibleBytes=" + lastAudibleSpoolBytesV030);'''
+        if (s.contains(oldFinish)) {
+            s = s.replace(oldFinish, '''        diag("capture_finish", "reason=" + reason + ";durationMs=" + frozenDurationMs
+                + ";written=" + spoolBytesWritten + ";consumed=" + spoolBytesConsumed
+                + ";feedOffset=" + feederReadOffset + ";safeOffset=" + safeCommittedOffset
+                + ";staleIgnored=" + staleCallbackIgnored
+                + ";lastRotationReconnects=" + lastRotationReconnectCount
+                + ";lastAudibleBytes=" + lastAudibleSpoolBytesV030);''')
+        }
+        serviceFile.write(s, "UTF-8")
+
+        File sanitizerFile = file("src/main/java/com/example/radikotranscriber/CorrectionSanitizer.java")
+        String z = sanitizerFile.getText("UTF-8")
+        z = z.replace("'永田詩央里','ノットイコールミー','永田ラジオ','ラジオ猫')) OR ",
+                "'永田詩央里','ノットイコールミー','永田ラジオ','ラジオ猫','けれけれ')) OR ")
+        sanitizerFile.write(z, "UTF-8")
+    }
+}
