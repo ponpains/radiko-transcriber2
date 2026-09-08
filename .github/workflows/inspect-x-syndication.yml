@@ -1,0 +1,34 @@
+name: Inspect X syndication
+on:
+  workflow_dispatch:
+  push:
+    branches: ["shiori-archive-mvp"]
+    paths: ['.github/workflows/inspect-x-syndication.yml']
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Inspect official public profile syndication
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import urllib.request,re
+          urls=[
+            'https://syndication.twitter.com/srv/timeline-profile/screen-name/nagata_shiori_',
+            'https://syndication.twitter.com/srv/timeline-profile/screen-name/nagata_shiori_?dnt=true',
+          ]
+          for u in urls:
+            print('URL',u)
+            try:
+              req=urllib.request.Request(u,headers={'User-Agent':'Mozilla/5.0'})
+              data=urllib.request.urlopen(req,timeout=20).read().decode('utf-8','replace')
+              print('STATUS OK LEN',len(data))
+              ids=sorted(set(re.findall(r'(?:status|tweet)[/"=:]+(\d{15,22})',data)))
+              print('IDS',len(ids),ids[-30:])
+              for pat in ['nagata_shiori_','llZ067RvWS','N5ouaCH0AU','2096592387166638489']:
+                print('HAS',pat,pat in data)
+              print(data[:2000].replace('\n',' '))
+            except Exception as e: print('ERR',repr(e))
+          PY
