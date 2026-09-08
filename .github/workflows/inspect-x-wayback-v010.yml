@@ -1,0 +1,24 @@
+name: Inspect X Wayback v0.10
+on:
+  workflow_dispatch:
+  push:
+    branches: ["shiori-archive-mvp"]
+    paths:
+      - '.github/workflows/inspect-x-wayback-v010.yml'
+      - 'shiori-archive/scripts/inspect_x_wayback_v010.py'
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: Inspect segmented Wayback status IDs
+        run: python3 shiori-archive/scripts/inspect_x_wayback_v010.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: x-wayback-v010-report
+          path: |
+            /tmp/wayback_x_ids.json
+            /tmp/wayback_x_report.json
