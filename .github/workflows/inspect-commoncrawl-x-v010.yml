@@ -1,0 +1,23 @@
+name: Inspect Common Crawl X v0.10
+on:
+  workflow_dispatch:
+  push:
+    branches: ["shiori-archive-mvp"]
+    paths:
+      - '.github/workflows/inspect-commoncrawl-x-v010.yml'
+      - 'shiori-archive/scripts/inspect_commoncrawl_x_v010.py'
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 shiori-archive/scripts/inspect_commoncrawl_x_v010.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: commoncrawl-x-v010-report
+          path: |
+            /tmp/commoncrawl_x_ids.json
+            /tmp/commoncrawl_x_report.json
