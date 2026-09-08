@@ -10,8 +10,8 @@ android {
         applicationId "com.ponpains.radikotranscriber"
         minSdk 33
         targetSdk 35
-        versionCode 29
-        versionName "0.29"
+        versionCode 30
+        versionName "0.30"
     }
 
     compileOptions {
@@ -59,3 +59,7 @@ apply from: 'v026-compile-fix.gradle'
 apply from: 'v027-source-patch2.gradle'
 apply from: 'v028-source-patch.gradle'
 apply from: 'v029-source-patch.gradle'
+// v030-source-patch references this only while rewriting RadikoApplication's diagnostic string.
+ext.CorrectionSanitizer = [VERSION: 'correction-sanitizer-v030-2026-09-08']
+apply from: 'v030-source-patch.gradle'
+apply from: 'v030-followup.gradle'
