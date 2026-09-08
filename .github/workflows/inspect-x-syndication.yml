@@ -14,21 +14,19 @@ jobs:
         shell: bash
         run: |
           python3 - <<'PY'
-          import urllib.request,re
-          urls=[
-            'https://syndication.twitter.com/srv/timeline-profile/screen-name/nagata_shiori_',
-            'https://syndication.twitter.com/srv/timeline-profile/screen-name/nagata_shiori_?dnt=true',
-          ]
-          for u in urls:
-            print('URL',u)
-            try:
-              req=urllib.request.Request(u,headers={'User-Agent':'Mozilla/5.0'})
-              data=urllib.request.urlopen(req,timeout=20).read().decode('utf-8','replace')
-              print('STATUS OK LEN',len(data))
-              ids=sorted(set(re.findall(r'(?:status|tweet)[/"=:]+(\d{15,22})',data)))
-              print('IDS',len(ids),ids[-30:])
-              for pat in ['nagata_shiori_','llZ067RvWS','N5ouaCH0AU','2096592387166638489']:
-                print('HAS',pat,pat in data)
-              print(data[:2000].replace('\n',' '))
-            except Exception as e: print('ERR',repr(e))
+          import urllib.request,re,json,html
+          u='https://syndication.twitter.com/srv/timeline-profile/screen-name/nagata_shiori_?dnt=true'
+          req=urllib.request.Request(u,headers={'User-Agent':'Mozilla/5.0'})
+          data=urllib.request.urlopen(req,timeout=20).read().decode('utf-8','replace')
+          m=re.search(r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>',data,re.S)
+          obj=json.loads(html.unescape(m.group(1)))
+          tl=obj['props']['pageProps']['timeline']
+          print('TIMELINE_KEYS',list(tl.keys()))
+          entries=tl.get('entries',[])
+          print('ENTRY_COUNT',len(entries))
+          print('ENTRY_IDS',[e.get('entry_id') for e in entries])
+          for e in entries[:3]:
+            print('ENTRY_KEYS',e.keys())
+            print(json.dumps(e,ensure_ascii=False)[:5000])
+          print('CURSORS',[(k,v) for k,v in tl.items() if 'cursor' in k.lower()])
           PY
