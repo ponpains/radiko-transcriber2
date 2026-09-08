@@ -1,0 +1,319 @@
+// v0.30: harden learned corrections, preserve the true audio tail, and spend re-recognition only
+// on high-value suspicious segments. Applied after v0.29.
+def replaceRange030 = { String text, String startMarker, String endMarker, String replacement, String label ->
+    int a = text.indexOf(startMarker)
+    if (a < 0) throw new GradleException("v0.30: start marker missing: " + label)
+    int b = text.indexOf(endMarker, a)
+    if (b < 0) throw new GradleException("v0.30: end marker missing: " + label)
+    return text.substring(0, a) + replacement + text.substring(b)
+}
+
+tasks.named("preBuild").configure {
+    doLast {
+        // -----------------------------------------------------------------------------
+        // 1) Learned dictionary: quarantine rules that modify already-correct vocabulary or
+        //    merely add/remove context around the same token. The v0.29 diagnostic contained
+        //    e.g. 永田詩央里 -> のの 永田詩央里, which is structurally unsafe even though its
+        //    edit distance is small.
+        // -----------------------------------------------------------------------------
+        File sanitizerFile = file("src/main/java/com/example/radikotranscriber/CorrectionSanitizer.java")
+        String z = sanitizerFile.getText("UTF-8")
+
+        if (!z.contains("correction-sanitizer-v030")) {
+            z = z.replace("public final class CorrectionSanitizer {\n    private CorrectionSanitizer() {}",
+                    "public final class CorrectionSanitizer {\n"
+                    + "    public static final String VERSION = \"correction-sanitizer-v030-2026-09-08\";\n"
+                    + "    private CorrectionSanitizer() {}")
+        }
+
+        if (!z.contains("isUnsafeStructuralPair(program, w, c)")) {
+            String safeLearnMarker = '''        if (KerekereContextProfile.isUnsafeAutomaticPair(program, w, c)) return false;
+        if (isProtected(w, c)) return true;
+        int wl = semantic(w).length(), cl = semantic(c).length();'''
+            if (!z.contains(safeLearnMarker)) throw new GradleException("v0.30: safe-learn marker missing")
+            z = z.replace(safeLearnMarker, '''        if (KerekereContextProfile.isUnsafeAutomaticPair(program, w, c)) return false;
+        if (isProtected(w, c)) return true;
+        if (isUnsafeStructuralPair(program, w, c)) return false;
+        int wl = semantic(w).length(), cl = semantic(c).length();''')
+        }
+
+        if (!z.contains("isUnsafeStructuralPair(r.program, w, c)")) {
+            String applyMarker = '''            if (w.isEmpty() || c.isEmpty() || w.equals(c)) continue;
+            if (!isProtected(w, c) && semantic(w).length() < 4) continue;'''
+            if (!z.contains(applyMarker)) throw new GradleException("v0.30: single-pass marker missing")
+            z = z.replace(applyMarker, '''            if (w.isEmpty() || c.isEmpty() || w.equals(c)) continue;
+            if (!isProtected(w, c) && semantic(w).length() < 4) continue;
+            // Runtime guard too: even if an old DB row survived a previous sanitizer run, it must
+            // never be allowed to mutate an already-correct token during recognition.
+            if (!isProtected(w, c) && isUnsafeStructuralPair(r.program, w, c)) continue;''')
+        }
+
+        if (!z.contains("if (isUnsafeStructuralPair(r.program, w, c)) return true;")) {
+            String unsafeMarker = '''        if (w.isEmpty() || c.isEmpty() || semantic(w).equals(semantic(c))) return true;
+        if (KerekereContextProfile.isUnsafeAutomaticPair(r.program, w, c)) return true;
+        int wl = semantic(w).length(), cl = semantic(c).length();'''
+            if (!z.contains(unsafeMarker)) throw new GradleException("v0.30: existing-rule marker missing")
+            z = z.replace(unsafeMarker, '''        if (w.isEmpty() || c.isEmpty() || semantic(w).equals(semantic(c))) return true;
+        if (KerekereContextProfile.isUnsafeAutomaticPair(r.program, w, c)) return true;
+        if (!r.protectedRule && isUnsafeStructuralPair(r.program, w, c)) return true;
+        int wl = semantic(w).length(), cl = semantic(c).length();''')
+        }
+
+        if (!z.contains("private static boolean isUnsafeStructuralPair")) {
+            String methodMarker = '''    private static boolean reaches(HashMap<String, ArrayList<Row>> graph, String program,
+'''
+            if (!z.contains(methodMarker)) throw new GradleException("v0.30: sanitizer helper marker missing")
+            z = z.replace(methodMarker, '''    private static boolean isUnsafeStructuralPair(String program, String wrong, String correct) {
+        if (isProtected(wrong, correct)) return false;
+        String w = semantic(wrong), c = semantic(correct);
+        if (w.isEmpty() || c.isEmpty() || w.equals(c)) return false;
+
+        // These are canonical programme terms. Once ASR already has them right, a learned rule must
+        // not prepend particles, append nearby speech, shorten them, or turn them into another term.
+        String[] canonicalGood = {"永田詩央里", "ノットイコールミー", "永田ラジオ", "けれけれ", "ラジオ猫"};
+        for (String term : canonicalGood) {
+            String t = semantic(term);
+            if (w.equals(t) && !c.equals(t)) return true;
+            if (w.contains(t) && !c.contains(t)) return true;
+        }
+
+        // Context insertion/deletion masquerading as a spelling correction. Automatic reusable
+        // rules should replace a token, not wrap an already-correct token in neighbouring words.
+        if (w.length() >= 4 && c.length() >= 4 && (c.contains(w) || w.contains(c))) return true;
+        return false;
+    }
+
+    private static boolean reaches(HashMap<String, ArrayList<Row>> graph, String program,
+''')
+        }
+
+        String guardStart = "    private static void installGuard(SQLiteDatabase db) {"
+        String guardEnd = "    private static boolean isProtected(String wrong, String correct) {"
+        if (!z.contains("corrections_guard_v30")) {
+            String guardMethod = '''    private static void installGuard(SQLiteDatabase db) {
+        db.execSQL("DROP TRIGGER IF EXISTS corrections_guard_v16");
+        db.execSQL("DROP TRIGGER IF EXISTS corrections_guard_v17");
+        db.execSQL("DROP TRIGGER IF EXISTS corrections_guard_v30");
+        db.execSQL("CREATE TRIGGER corrections_guard_v30 BEFORE INSERT ON corrections WHEN " +
+                "TRIM(NEW.wrong)=TRIM(NEW.correct) OR " +
+                "LENGTH(TRIM(NEW.wrong))<=3 OR " +
+                "LENGTH(TRIM(NEW.wrong))>28 OR LENGTH(TRIM(NEW.correct))>28 OR " +
+                "(NEW.program LIKE '%けれけれ%' AND REPLACE(TRIM(NEW.wrong),' ','') IN " +
+                "('キラキラ','キレキレ','キレレ','テレテレ','けれ','くる','きた','きて','言葉','方が'," +
+                "'永田詩央里','ノットイコールミー','永田ラジオ','ラジオ猫')) OR " +
+                "EXISTS(SELECT 1 FROM corrections c WHERE c.program=NEW.program AND c.wrong=NEW.correct AND c.correct=NEW.wrong) OR " +
+                "EXISTS(SELECT 1 FROM corrections c WHERE c.program=NEW.program AND c.wrong=NEW.wrong AND c.correct<>NEW.correct) " +
+                "BEGIN SELECT RAISE(IGNORE); END");
+    }
+
+'''
+            z = replaceRange030(z, guardStart, guardEnd, guardMethod, "dictionary guard")
+        }
+        sanitizerFile.write(z, "UTF-8")
+
+        // The single-pass dictionary is already safe from cascades. v0.30 additionally compares the
+        // whole utterance before/after that pass, so content-dropping one-off rules are rolled back
+        // before ContextCorrectionEngine ever sees them.
+        File episodeFile = file("src/main/java/com/example/radikotranscriber/EpisodeStore.java")
+        String e = episodeFile.getText("UTF-8")
+        String oldApply = '''    public String applyCorrections(String program, String text) {
+        return CorrectionSanitizer.applySinglePass(getCorrections(program), text);
+    }
+'''
+        if (!e.contains("CorrectionSafetyV029.choose(text, candidate")) {
+            if (!e.contains(oldApply)) throw new GradleException("v0.30: EpisodeStore safe apply marker missing")
+            e = e.replace(oldApply, '''    public String applyCorrections(String program, String text) {
+        String candidate = CorrectionSanitizer.applySinglePass(getCorrections(program), text);
+        return CorrectionSafetyV029.choose(text, candidate, program);
+    }
+''')
+        }
+        episodeFile.write(e, "UTF-8")
+
+        // Make the sanitizer revision explicit in startup diagnostics.
+        File appFile = file("src/main/java/com/example/radikotranscriber/RadikoApplication.java")
+        String a = appFile.getText("UTF-8")
+        a = a.replace(";singlePass=true;guard=v17;profile=",
+                ";singlePass=true;guard=v30;sanitizer=" + CorrectionSanitizer.VERSION + ";profile=")
+        appFile.write(a, "UTF-8")
+
+        // -----------------------------------------------------------------------------
+        // 2) Selective re-recognition: v0.29 now reliably returns segment_final results. The new
+        //    diagnostic shows generic MAIL candidate ties are usually worse when re-recognized, so
+        //    don't spend a second pass on those low-value cases. Keep it for identity/entities,
+        //    announcements, songs and ending mismatches where a second listen can genuinely help.
+        // -----------------------------------------------------------------------------
+        File rrFile = file("src/main/java/com/example/radikotranscriber/SelectiveRerecognitionEngineV026.java")
+        String r = rrFile.getText("UTF-8")
+        r = r.replace("selective-rerecognition-v029-2026-09-08", "selective-rerecognition-v030-2026-09-08")
+        if (!r.contains("lowValueTieV030")) {
+            String suspectMarker = '''        boolean suspicious = decision.suspicious
+                || KerekereCandidateDecisionEngine.looksSuspiciousText(decision.state, text);
+        if (!suspicious) return;
+
+        int priority = 0;'''
+            if (!r.contains(suspectMarker)) throw new GradleException("v0.30: rerecognition suspect marker missing")
+            r = r.replace(suspectMarker, '''        boolean suspicious = decision.suspicious
+                || KerekereCandidateDecisionEngine.looksSuspiciousText(decision.state, text);
+        if (!suspicious) return;
+
+        String reasonV030 = safe(decision.suspiciousReason);
+        boolean lowValueTieV030 = ("candidate_tie".equals(reasonV030)
+                || "candidate_tie,clipped_kanji_end".equals(reasonV030)
+                || "low_confidence,candidate_tie".equals(reasonV030))
+                && (decision.state == KerekereCandidateDecisionEngine.State.MAIL
+                    || decision.state == KerekereCandidateDecisionEngine.State.FREE_TALK
+                    || decision.state == KerekereCandidateDecisionEngine.State.CORNER);
+        if (lowValueTieV030) return;
+
+        int priority = 0;''')
+        }
+        rrFile.write(r, "UTF-8")
+
+        // -----------------------------------------------------------------------------
+        // 3) Final audio tail: v0.29 diagnostics showed capture_finish could be followed by one last
+        //    capture-thread write, while the old wall-clock silence trim ran immediately. Record the
+        //    actual byte offset of the last audible chunk, stop/unblock and join capture first, then
+        //    trim only bytes proven to be after that point (keeping 900 ms safety tail).
+        // -----------------------------------------------------------------------------
+        File serviceFile = file("src/main/java/com/example/radikotranscriber/TranscribeService.java")
+        String s = serviceFile.getText("UTF-8")
+
+        if (!s.contains("lastAudibleSpoolBytesV030")) {
+            String fieldMarker = "    private volatile long lastDiagnosticAudioAt = 0L;\n"
+            if (!s.contains(fieldMarker)) throw new GradleException("v0.30: audio-tail field marker missing")
+            s = s.replace(fieldMarker, fieldMarker
+                    + "    private volatile long lastAudibleSpoolBytesV030 = 0L;\n")
+        }
+
+        if (!s.contains("lastAudibleSpoolBytesV030 = 0L;")) {
+            String resetMarker = '''        frozenDurationMs = 0L;
+        lastDiagnosticAudioAt = 0L;'''
+            if (!s.contains(resetMarker)) throw new GradleException("v0.30: audio-tail reset marker missing")
+            s = s.replace(resetMarker, '''        frozenDurationMs = 0L;
+        lastDiagnosticAudioAt = 0L;
+        lastAudibleSpoolBytesV030 = 0L;''')
+        }
+
+        if (!s.contains("lastAudibleSpoolBytesV030 = spoolBytesWritten")) {
+            String writeMarker = '''                    writeSpool(buf, n);
+
+                    if (now - lastDiagnosticAudioAt >= 5000L) {'''
+            if (!s.contains(writeMarker)) throw new GradleException("v0.30: audible-byte marker missing")
+            s = s.replace(writeMarker, '''                    writeSpool(buf, n);
+                    if (localPeak >= 35) lastAudibleSpoolBytesV030 = spoolBytesWritten;
+
+                    if (now - lastDiagnosticAudioAt >= 5000L) {''')
+        }
+
+        String finishStart = "    private void finishCaptureAndDrain(String message, String reason) {"
+        String trimStart = "    private void trimFinalSilenceFromSpool() {"
+        if (!s.contains("capture_join_v030")) {
+            String finishMethod = '''    private void finishCaptureAndDrain(String message, String reason) {
+        if (!running || sourceFinished) return;
+        sourceFinished = true;
+        captureActive = false;
+        frozenDurationMs = currentDurationMs();
+
+        // stop() unblocks AudioRecord.read(). Wait for the capture loop to exit before closing or
+        // trimming its spool, so a final read can never race the truncation step.
+        Thread endingCapture = captureThread;
+        try { if (recorder != null) recorder.stop(); } catch (Exception ignored) {}
+        if (endingCapture != null && endingCapture != Thread.currentThread()) {
+            try { endingCapture.join(1200L); } catch (InterruptedException ignored) {
+                Thread.currentThread().interrupt();
+            }
+        }
+        diag("capture_join_v030", "alive=" + (endingCapture != null && endingCapture.isAlive())
+                + ";written=" + spoolBytesWritten + ";lastAudibleBytes=" + lastAudibleSpoolBytesV030);
+
+        try { if (recorder != null) recorder.release(); } catch (Exception ignored) {}
+        recorder = null;
+        try { if (projection != null) projection.stop(); } catch (Exception ignored) {}
+        projection = null;
+
+        synchronized (spoolLock) {
+            try { if (spoolOut != null) spoolOut.close(); } catch (Exception ignored) {}
+            spoolOut = null;
+        }
+        trimFinalSilenceFromSpool();
+        diag("capture_finish", "reason=" + reason + ";durationMs=" + frozenDurationMs
+                + ";written=" + spoolBytesWritten + ";consumed=" + spoolBytesConsumed
+                + ";lastAudibleBytes=" + lastAudibleSpoolBytesV030);
+        broadcast(message, true);
+        updateNotification(message);
+
+        if (spoolBytesConsumed >= spoolBytesWritten) markDrainComplete();
+        else mainHandler.postDelayed(() -> {
+            if (running && sourceFinished) broadcast(bufferedStatusText(), true);
+        }, 500L);
+    }
+
+'''
+            s = replaceRange030(s, finishStart, trimStart, finishMethod, "capture finalization")
+        }
+
+        String trimEnd = "    private void markDrainComplete() {"
+        if (!s.contains("audio_tail_trim_v030")) {
+            String trimMethod = '''    private void trimFinalSilenceFromSpool() {
+        if (spoolFile == null || spoolBytesWritten <= 0L) return;
+        long audibleEnd = Math.max(0L, Math.min(lastAudibleSpoolBytesV030, spoolBytesWritten));
+        if (audibleEnd <= 0L) return;
+
+        // Preserve 900 ms after the last chunk that actually crossed the audible threshold. This is
+        // based on captured byte position, not wall-clock time, so scheduler/AudioRecord races cannot
+        // make us cut real audio. Never truncate bytes the recognizer has already consumed either.
+        long tailBytes = Math.round(900.0 * SAMPLE_RATE * 2.0 / 1000.0);
+        tailBytes -= tailBytes & 1L;
+        long requestedTarget = Math.min(spoolBytesWritten, audibleEnd + tailBytes);
+        long target = Math.max(spoolBytesConsumed, requestedTarget);
+        if (target >= spoolBytesWritten) {
+            diag("audio_tail_trim_v030", "trimmedBytes=0;written=" + spoolBytesWritten
+                    + ";consumed=" + spoolBytesConsumed + ";audibleEnd=" + audibleEnd);
+            return;
+        }
+
+        long before = spoolBytesWritten;
+        try (RandomAccessFile raf = new RandomAccessFile(spoolFile, "rw")) {
+            raf.setLength(target);
+            spoolBytesWritten = target;
+            long trimmedBytes = before - target;
+            long trimmedRawMs = Math.round(trimmedBytes * 1000.0 / (SAMPLE_RATE * 2.0));
+            frozenDurationMs = Math.max(0L,
+                    frozenDurationMs - Math.round(trimmedRawMs * playbackSpeed));
+            diag("audio_tail_trim_v030", "trimmedBytes=" + trimmedBytes
+                    + ";trimmedRawMs=" + trimmedRawMs + ";newBytes=" + target
+                    + ";consumed=" + spoolBytesConsumed + ";audibleEnd=" + audibleEnd
+                    + ";durationMs=" + frozenDurationMs);
+        } catch (Exception ex) {
+            diag("audio_tail_trim_v030_error", ex.getClass().getSimpleName());
+        }
+    }
+
+'''
+            s = replaceRange030(s, trimStart, trimEnd, trimMethod, "byte-based final silence trim")
+        }
+        serviceFile.write(s, "UTF-8")
+
+        // Surface the new accuracy pass in diagnostics for the next comparison.
+        File diagnosticFile = file("src/main/java/com/example/radikotranscriber/DiagnosticStore.java")
+        String d = diagnosticFile.getText("UTF-8")
+        if (!d.contains("correctionSanitizerV030")) {
+            String marker = '''                o.put("observedCorrectionsV027", KerekereObservedCorrectionsV027.VERSION);'''
+            if (d.contains(marker)) {
+                d = d.replace(marker, marker + '''
+                o.put("correctionSanitizerV030", CorrectionSanitizer.VERSION);
+                o.put("audioTailV030", "byte-position-tail-v030");
+                o.put("rerecognitionSelectionV030", "high-value-only-v030");''')
+            }
+        }
+        diagnosticFile.write(d, "UTF-8")
+
+        File layout = file("src/main/res/layout/activity_main.xml")
+        String x = layout.getText("UTF-8")
+        x = x.replace("v0.29", "v0.30")
+        x = x.replace("再認識結果修正 / 補正悪化ガード / COLD_OPEN安全化",
+                "補正辞書クリーン化 / 音声末尾保護 / 高価値箇所のみ再認識")
+        layout.write(x, "UTF-8")
+    }
+}
