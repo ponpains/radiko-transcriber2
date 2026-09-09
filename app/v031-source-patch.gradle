@@ -1,0 +1,326 @@
+// v0.31: make episode metadata durable across Activity recreation and prevent two concrete
+// N-best regressions seen in the v0.30 diagnostic. Applied last, after v0.30 follow-up.
+def replaceOnce031 = { String text, String oldText, String newText, String label ->
+    if (text.contains(newText)) return text
+    if (!text.contains(oldText)) throw new GradleException("v0.31: marker missing: " + label)
+    return text.replace(oldText, newText)
+}
+
+tasks.named("preBuild").configure {
+    doLast {
+        // -----------------------------------------------------------------------------
+        // 1) Metadata durability.
+        // v0.30 can recreate MainActivity while TranscribeService is alive. syncRuntimeState()
+        // restored only the episode id, leaving title/url blank. After the service stopped,
+        // saveCurrentEdits() could then persist those blank widgets over valid DB metadata.
+        // Bind the running episode's metadata from DB, autosave real edits, and keep an unsaved
+        // new-episode draft in app-private SharedPreferences until the row is created.
+        // -----------------------------------------------------------------------------
+        File mainFile = file("src/main/java/com/example/radikotranscriber/MainActivity.java")
+        String m = mainFile.getText("UTF-8")
+
+        if (!m.contains("metaSaveHandlerV031")) {
+            String fields = '''    private String lastServiceText = "";
+    private long lastUiDiagnosticAt = 0L;
+'''
+            String fieldsNew = '''    private String lastServiceText = "";
+    private long lastUiDiagnosticAt = 0L;
+    private boolean applyingMetaUiV031 = false;
+    private final Handler metaSaveHandlerV031 = new Handler(Looper.getMainLooper());
+    private final Runnable metaSaveRunnableV031 = () -> saveMetadataV031("debounce");
+'''
+            m = replaceOnce031(m, fields, fieldsNew, "metadata fields")
+        }
+
+        if (!m.contains("setupMetadataAutosaveV031();")) {
+            String init = '''        newEpisode();
+        syncRuntimeState();
+
+        if (Build.VERSION.SDK_INT >= 33'''
+            String initNew = '''        newEpisode();
+        syncRuntimeState();
+        setupMetadataAutosaveV031();
+        if (!serviceRunning && activeEpisodeId <= 0) restoreDraftMetadataV031();
+
+        if (Build.VERSION.SDK_INT >= 33'''
+            m = replaceOnce031(m, init, initNew, "metadata autosave init")
+        }
+
+        if (!m.contains("private void setupMetadataAutosaveV031()")) {
+            String marker = '''    private void requestStart(int mode) {'''
+            if (!m.contains(marker)) throw new GradleException("v0.31: metadata methods marker missing")
+            String methods = '''    private void setupMetadataAutosaveV031() {
+        TextWatcher watcher = new TextWatcher() {
+            @Override public void beforeTextChanged(CharSequence s, int start, int count, int after) {}
+            @Override public void onTextChanged(CharSequence s, int start, int before, int count) {}
+            @Override public void afterTextChanged(Editable s) {
+                if (applyingMetaUiV031) return;
+                updateCurrentLabel();
+                metaSaveHandlerV031.removeCallbacks(metaSaveRunnableV031);
+                if (activeEpisodeId > 0) {
+                    metaSaveHandlerV031.postDelayed(metaSaveRunnableV031, 350L);
+                } else {
+                    saveDraftMetadataV031();
+                }
+            }
+        };
+        programInput.addTextChangedListener(watcher);
+        episodeInput.addTextChangedListener(watcher);
+        urlInput.addTextChangedListener(watcher);
+    }
+
+    private void saveMetadataV031(String reason) {
+        if (store == null || applyingMetaUiV031) return;
+        String p = programInput == null ? "" : programInput.getText().toString().trim();
+        String t = episodeInput == null ? "" : episodeInput.getText().toString().trim();
+        String u = urlInput == null ? "" : urlInput.getText().toString().trim();
+        if (activeEpisodeId <= 0) {
+            saveDraftMetadataV031();
+            return;
+        }
+        store.updateMeta(activeEpisodeId, p, t, u);
+        clearDraftMetadataV031();
+        if (diagnostics != null) diagnostics.log(activeEpisodeId, "ui_meta_saved_v031",
+                "reason=" + reason + ";programChars=" + p.length()
+                        + ";titleChars=" + t.length() + ";urlChars=" + u.length()
+                        + ";running=" + serviceRunning);
+    }
+
+    private void bindMetadataFromStoreV031(long episodeId, String reason) {
+        if (store == null || episodeId <= 0) return;
+        EpisodeStore.Episode e = store.getEpisode(episodeId);
+        if (e == null) return;
+        metaSaveHandlerV031.removeCallbacks(metaSaveRunnableV031);
+        applyingMetaUiV031 = true;
+        try {
+            programInput.setText(e.program == null ? "" : e.program);
+            episodeInput.setText(e.title == null ? "" : e.title);
+            urlInput.setText(e.url == null ? "" : e.url);
+        } finally {
+            applyingMetaUiV031 = false;
+        }
+        clearDraftMetadataV031();
+        if (diagnostics != null) diagnostics.log(episodeId, "ui_meta_bound_v031",
+                "reason=" + reason + ";programChars=" + safeLengthV031(e.program)
+                        + ";titleChars=" + safeLengthV031(e.title)
+                        + ";urlChars=" + safeLengthV031(e.url));
+        updateCurrentLabel();
+    }
+
+    private int safeLengthV031(String s) { return s == null ? 0 : s.length(); }
+
+    private void saveDraftMetadataV031() {
+        if (programInput == null || episodeInput == null || urlInput == null || applyingMetaUiV031) return;
+        getSharedPreferences("episode_meta_draft_v031", MODE_PRIVATE).edit()
+                .putString("program", programInput.getText().toString())
+                .putString("title", episodeInput.getText().toString())
+                .putString("url", urlInput.getText().toString())
+                .putLong("savedAt", System.currentTimeMillis())
+                .apply();
+    }
+
+    private void restoreDraftMetadataV031() {
+        SharedPreferences p = getSharedPreferences("episode_meta_draft_v031", MODE_PRIVATE);
+        long savedAt = p.getLong("savedAt", 0L);
+        if (savedAt <= 0L || System.currentTimeMillis() - savedAt > 7L * 24L * 60L * 60L * 1000L) return;
+        String program = p.getString("program", "");
+        String title = p.getString("title", "");
+        String url = p.getString("url", "");
+        if (program.isEmpty() && title.isEmpty() && url.isEmpty()) return;
+        applyingMetaUiV031 = true;
+        try {
+            programInput.setText(program);
+            episodeInput.setText(title);
+            urlInput.setText(url);
+        } finally {
+            applyingMetaUiV031 = false;
+        }
+        if (diagnostics != null) diagnostics.log(-1L, "ui_meta_draft_restored_v031",
+                "programChars=" + program.length() + ";titleChars=" + title.length()
+                        + ";urlChars=" + url.length());
+        updateCurrentLabel();
+    }
+
+    private void clearDraftMetadataV031() {
+        getSharedPreferences("episode_meta_draft_v031", MODE_PRIVATE).edit().clear().apply();
+    }
+
+'''
+            m = m.replace(marker, methods + marker)
+        }
+
+        // When a service broadcast points at another/current restored episode, populate the fields
+        // from the DB before any later lifecycle save can see transient blank widgets.
+        if (!m.contains("episodeChangedV031")) {
+            String receiver = '''            serviceRunning = running;
+            if (episodeId > 0) activeEpisodeId = episodeId;
+            if (s != null) status.setText(s);'''
+            String receiverNew = '''            boolean wasRunningV031 = serviceRunning;
+            serviceRunning = running;
+            boolean episodeChangedV031 = episodeId > 0 && activeEpisodeId != episodeId;
+            if (episodeId > 0) {
+                activeEpisodeId = episodeId;
+                if (episodeChangedV031 || (wasRunningV031 && !running)) {
+                    bindMetadataFromStoreV031(episodeId,
+                            episodeChangedV031 ? "broadcast_episode" : "broadcast_finish");
+                }
+            }
+            if (s != null) status.setText(s);'''
+            m = replaceOnce031(m, receiver, receiverNew, "receiver metadata bind")
+        }
+
+        if (!m.contains("bindMetadataFromStoreV031(id, \"runtime_resync\")")) {
+            String runtime = '''        long id = p.getLong("episodeId", -1L);
+        if (id > 0) activeEpisodeId = id;
+        String rs = p.getString("status", "バックグラウンドで文字起こし中です。");'''
+            String runtimeNew = '''        long id = p.getLong("episodeId", -1L);
+        if (id > 0) {
+            activeEpisodeId = id;
+            bindMetadataFromStoreV031(id, "runtime_resync");
+        }
+        String rs = p.getString("status", "バックグラウンドで文字起こし中です。");'''
+            m = replaceOnce031(m, runtime, runtimeNew, "runtime metadata bind")
+        }
+
+        // Once an episode row exists, the DB is authoritative and the temporary draft can go.
+        if (!m.contains("clearDraftMetadataV031();\n            clearTranscriptForFreshEpisode();")) {
+            String create = '''            activeEpisodeId = store.createEpisode(p, t, u);
+            clearTranscriptForFreshEpisode();'''
+            String createNew = '''            activeEpisodeId = store.createEpisode(p, t, u);
+            clearDraftMetadataV031();
+            clearTranscriptForFreshEpisode();'''
+            m = replaceOnce031(m, create, createNew, "prepare episode draft clear")
+        }
+
+        if (!m.contains("activeEpisodeId = store.createEpisode(p, t, u);\n            clearDraftMetadataV031();\n        } else")) {
+            String ensure = '''        if (activeEpisodeId <= 0) {
+            activeEpisodeId = store.createEpisode(p, t, u);
+        } else {'''
+            String ensureNew = '''        if (activeEpisodeId <= 0) {
+            activeEpisodeId = store.createEpisode(p, t, u);
+            clearDraftMetadataV031();
+        } else {'''
+            m = replaceOnce031(m, ensure, ensureNew, "ensure episode draft clear")
+        }
+
+        // Metadata is safe to persist while transcription is running; only the transcript editor
+        // itself must remain protected from overwriting the service-owned live text.
+        if (!m.contains("saveMetadataV031(\"save_current\")")) {
+            String save = '''    private void saveCurrentEdits() {
+        if (store == null || activeEpisodeId <= 0 || serviceRunning) return;
+        store.updateMeta(activeEpisodeId,
+                programInput.getText().toString().trim(),
+                episodeInput.getText().toString().trim(),
+                urlInput.getText().toString().trim());
+        store.updateEditedTranscript(activeEpisodeId, transcript.getText().toString());
+    }
+'''
+            String saveNew = '''    private void saveCurrentEdits() {
+        if (store == null) return;
+        metaSaveHandlerV031.removeCallbacks(metaSaveRunnableV031);
+        saveMetadataV031("save_current");
+        if (activeEpisodeId > 0 && !serviceRunning) {
+            store.updateEditedTranscript(activeEpisodeId, transcript.getText().toString());
+        }
+    }
+'''
+            m = replaceOnce031(m, save, saveNew, "save current edits")
+        }
+
+        if (!m.contains("metaSaveHandlerV031.removeCallbacks(metaSaveRunnableV031);\n        try { unregisterReceiver")) {
+            String destroy = '''    @Override protected void onDestroy() {
+        try { unregisterReceiver(receiver); } catch (Exception ignored) {}
+        super.onDestroy();
+    }'''
+            String destroyNew = '''    @Override protected void onDestroy() {
+        metaSaveHandlerV031.removeCallbacks(metaSaveRunnableV031);
+        try { unregisterReceiver(receiver); } catch (Exception ignored) {}
+        super.onDestroy();
+    }'''
+            m = replaceOnce031(m, destroy, destroyNew, "destroy metadata callback")
+        }
+
+        mainFile.write(m, "UTF-8")
+
+        // -----------------------------------------------------------------------------
+        // 2) N-best completeness guard.
+        // v0.30 selected "毎日 Yahoo JAPAN の" over the recognizer's primary candidate
+        // "毎日 Yahoo JAPAN の使える Ai エージェント" for only +0.029 confidence. In free
+        // talk, a candidate that is merely a much shorter prefix should not win on a tiny
+        // confidence advantage and silently discard spoken content.
+        // -----------------------------------------------------------------------------
+        File candidateFile = file("src/main/java/com/example/radikotranscriber/KerekereCandidateDecisionEngine.java")
+        String c = candidateFile.getText("UTF-8")
+        c = c.replace("candidate-decision-v026-2026-09-06", "candidate-decision-v031-2026-09-09")
+
+        if (!c.contains("primaryRetentionPenaltyV031")) {
+            String stateMarker = '''        State state = detectState(previousText, candidates.get(0));
+        out.state = state;
+        double best = -1e18, second = -1e18;'''
+            String stateNew = '''        State state = detectState(previousText, candidates.get(0));
+        out.state = state;
+        String primaryCandidateV031 = safe(candidates.get(0)).trim();
+        float primaryConfidenceV031 = confidence != null && confidence.length > 0 ? confidence[0] : -1f;
+        double best = -1e18, second = -1e18;'''
+            c = replaceOnce031(c, stateMarker, stateNew, "candidate primary baseline")
+
+            String scoreMarker = '''            double score = conf >= 0 ? conf * 8.0 : 0.0;
+            score -= i * 0.07;'''
+            String scoreNew = '''            double score = conf >= 0 ? conf * 8.0 : 0.0;
+            score -= i * 0.07;
+            score += primaryRetentionPenaltyV031(state, primaryCandidateV031, c,
+                    primaryConfidenceV031, conf);'''
+            c = replaceOnce031(c, scoreMarker, scoreNew, "candidate retention score")
+
+            String helperMarker = '''    private static double languagePlausibility(String c, State state) {'''
+            if (!c.contains(helperMarker)) throw new GradleException("v0.31: candidate helper marker missing")
+            String helper = '''    private static double primaryRetentionPenaltyV031(State state, String primary,
+                                                        String candidate,
+                                                        float primaryConfidence,
+                                                        float candidateConfidence) {
+        if (state != State.FREE_TALK) return 0.0;
+        String p = compactV031(primary), c = compactV031(candidate);
+        if (p.length() < 10 || c.isEmpty() || c.length() >= p.length() || !p.startsWith(c)) return 0.0;
+        double coverage = c.length() / (double)p.length();
+        double gain = (primaryConfidence >= 0f && candidateConfidence >= 0f)
+                ? candidateConfidence - primaryConfidence : 0.0;
+        if (coverage < 0.68 && gain < 0.08) return -8.0;
+        if (coverage < 0.82 && gain < 0.05) return -4.5;
+        if (coverage < 0.93 && gain < 0.03) return -2.2;
+        return 0.0;
+    }
+
+    private static String compactV031(String s) {
+        return safe(s).replaceAll("[\\s、。！？!?，,.・･：:；;\\\"'’「」『』()（）]+", "");
+    }
+
+'''
+            c = c.replace(helperMarker, helper + helperMarker)
+        }
+        candidateFile.write(c, "UTF-8")
+
+        // -----------------------------------------------------------------------------
+        // 3) ラジオ猫 vs ラジオネーム scoring.
+        // The primary ASR had "ラジオ ネコの名前" at higher confidence, but scoring failed to
+        // recognise the spaced spelling as the known show term and rewarded "ラジオネーム".
+        // Give the spaced cat spelling its canonical score and reject the tautological phrase
+        // "ラジオネームの名前".
+        // -----------------------------------------------------------------------------
+        File profileFile = file("src/main/java/com/example/radikotranscriber/KerekereContextProfile.java")
+        String k = profileFile.getText("UTF-8")
+        if (!k.contains("radioCatCandidateV031")) {
+            String profileScore = '''        double score = 0.0;
+
+        boolean showContext = showTitleContext(context);'''
+            String profileScoreNew = '''        double score = 0.0;
+
+        boolean radioCatCandidateV031 = containsAny(c, "ラジオ ネコ", "ラジオ 猫", "ラジオねこ", "ラジオ猫");
+        if (radioCatCandidateV031) score += 8.5;
+        if (c.contains("ラジオネームの名前")) score -= 10.0;
+
+        boolean showContext = showTitleContext(context);'''
+            k = replaceOnce031(k, profileScore, profileScoreNew, "radio cat candidate scoring")
+        }
+        profileFile.write(k, "UTF-8")
+    }
+}
