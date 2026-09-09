@@ -1,0 +1,76 @@
+name: Inspect Wayback profile timeline snapshots
+on:
+  workflow_dispatch:
+  push:
+    branches: ["shiori-archive-mvp"]
+    paths: ['.github/workflows/inspect-wayback-profile.yml']
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: Extract status IDs from historical profile snapshots
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json,re,time,urllib.parse,urllib.request,urllib.error,pathlib,datetime
+          UA='Mozilla/5.0 ShioriArchive/0.9.5 public archive research'
+          def get(u,timeout=35,retries=3):
+            last=None
+            for i in range(retries):
+              try:
+                req=urllib.request.Request(u,headers={'User-Agent':UA})
+                with urllib.request.urlopen(req,timeout=timeout) as r:return r.read().decode('utf-8','replace')
+              except urllib.error.HTTPError as e:
+                last=e
+                if e.code in (429,502,503,504):time.sleep(min(8*(i+1),25));continue
+                break
+              except Exception as e:last=e;time.sleep(min(4*(i+1),12))
+            print('ERR',type(last).__name__,last,str(u)[:110]);return ''
+          profiles=['https://twitter.com/nagata_shiori_','https://mobile.twitter.com/nagata_shiori_','https://www.twitter.com/nagata_shiori_','https://x.com/nagata_shiori_']
+          snaps=[]
+          for p in profiles:
+            q=urllib.parse.urlencode({'url':p,'output':'json','fl':'timestamp,original,statuscode,digest','filter':'statuscode:200','collapse':'digest'})
+            txt=get('https://web.archive.org/cdx/search/cdx?'+q,45)
+            try:a=json.loads(txt)
+            except:a=[]
+            for row in (a[1:] if isinstance(a,list) and a else []):
+              if len(row)>=2:snaps.append((row[0],row[1]))
+          print('RAW_SNAPSHOTS',len(snaps))
+          # Pick at most one snapshot per ISO week and URL family, favor latest within week.
+          chosen={}
+          for ts,u in snaps:
+            try:d=datetime.datetime.strptime(ts[:8],'%Y%m%d').date(); key=(d.isocalendar().year,d.isocalendar().week,'mobile' if 'mobile.' in u else 'web')
+            except:continue
+            if key not in chosen or ts>chosen[key][0]:chosen[key]=(ts,u)
+          selected=sorted(chosen.values())
+          print('WEEKLY_SELECTED',len(selected))
+          ids=set(); peryear={}; fetched=0; bytes_=0
+          for i,(ts,u) in enumerate(selected):
+            raw='https://web.archive.org/web/'+ts+'id_/'+u
+            body=get(raw,40,2)
+            if not body:continue
+            fetched+=1;bytes_+=len(body)
+            local=set(re.findall(r'(?:twitter|x)\.com/nagata_shiori_/(?:status|statuses)/(\d{15,22})',body,re.I))
+            # relative links used by older Twitter
+            local.update(re.findall(r'(?:href|permalink_path)[=:\"\\\']+[^\"\\\']*?/nagata_shiori_/(?:status|statuses)/(\d{15,22})',body,re.I))
+            # JSON-escaped relative paths
+            local.update(re.findall(r'nagata_shiori_[\\/]+status[\\/]+(\d{15,22})',body,re.I))
+            ids.update(local)
+            y=ts[:4];peryear[y]=peryear.get(y,0)+len(local)
+            if local:print('SNAP',ts,u,'IDS',len(local),'TOTAL',len(ids))
+            time.sleep(.22)
+          pathlib.Path('/tmp/wayback_profile_ids.txt').write_text('\n'.join(sorted(ids,key=int)),encoding='utf-8')
+          rep={'raw_snapshots':len(snaps),'weekly_selected':len(selected),'fetched':fetched,'bytes':bytes_,'unique_status_ids':len(ids),'snapshot_local_id_counts_by_year':peryear}
+          pathlib.Path('/tmp/wayback_profile_report.json').write_text(json.dumps(rep,indent=2),encoding='utf-8')
+          print('WAYBACK_PROFILE_FINAL',json.dumps(rep))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wayback-profile-nagata-x-ids
+          path: |
+            /tmp/wayback_profile_ids.txt
+            /tmp/wayback_profile_report.json
