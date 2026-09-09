@@ -1,0 +1,35 @@
+// v0.32 compile-safe follow-up: avoid quote/backslash-heavy generated Java in compactV032.
+tasks.named("preBuild").configure {
+    doLast {
+        File decisionFile = file("src/main/java/com/example/radikotranscriber/KerekereCandidateDecisionEngine.java")
+        String q = decisionFile.getText("UTF-8")
+        String start = "    private static String compactV032(String s) {"
+        String end = "    private static double similarityV032(String a, String b) {"
+        int a = q.indexOf(start)
+        if (a < 0) throw new GradleException("v0.32 followup: compact helper missing")
+        int b = q.indexOf(end, a)
+        if (b < 0) throw new GradleException("v0.32 followup: similarity helper marker missing")
+        String replacement = '''    private static String compactV032(String s) {
+        String x = safe(s);
+        StringBuilder b = new StringBuilder(x.length());
+        for (int i = 0; i < x.length(); i++) {
+            char ch = x.charAt(i);
+            if (Character.isWhitespace(ch)) continue;
+            int type = Character.getType(ch);
+            if (type == Character.CONNECTOR_PUNCTUATION
+                    || type == Character.DASH_PUNCTUATION
+                    || type == Character.START_PUNCTUATION
+                    || type == Character.END_PUNCTUATION
+                    || type == Character.INITIAL_QUOTE_PUNCTUATION
+                    || type == Character.FINAL_QUOTE_PUNCTUATION
+                    || type == Character.OTHER_PUNCTUATION) continue;
+            b.append(Character.toLowerCase(ch));
+        }
+        return b.toString();
+    }
+
+'''
+        q = q.substring(0, a) + replacement + q.substring(b)
+        decisionFile.write(q, "UTF-8")
+    }
+}

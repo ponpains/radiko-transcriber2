@@ -1,0 +1,191 @@
+// v0.32: fixes driven by the v0.31 diagnostic. Applied after every older source patch.
+def replaceOnce032 = { String text, String oldText, String newText, String label ->
+    if (text.contains(newText)) return text
+    if (!text.contains(oldText)) throw new GradleException("v0.32: marker missing: " + label)
+    return text.replace(oldText, newText)
+}
+
+tasks.named("preBuild").configure {
+    doLast {
+        // -----------------------------------------------------------------------------
+        // 1) Candidate selection safety.
+        // v0.31 still allowed context scorers to overrule the recognizer in ordinary free talk:
+        //   中田詩織の@.844 -> 私よりの@.725
+        //   ケレケレ@.911 -> ケラケレ@.860
+        // and a +.001 confidence alternative could drop the final word of a segment.
+        // Preserve the recognizer's primary candidate in FREE_TALK/MAIL unless the alternative has
+        // a real acoustic advantage or introduces a strong canonical programme term.
+        // -----------------------------------------------------------------------------
+        File decisionFile = file("src/main/java/com/example/radikotranscriber/KerekereCandidateDecisionEngine.java")
+        String q = decisionFile.getText("UTF-8")
+        q = q.replace("candidate-decision-v026-2026-09-06", "candidate-decision-v032-2026-09-09")
+        q = q.replace("candidate-decision-v027-2026-09-06", "candidate-decision-v032-2026-09-09")
+        q = q.replace("candidate-decision-v031-2026-09-09", "candidate-decision-v032-2026-09-09")
+
+        if (!q.contains("primaryGuardedV032")) {
+            String fieldMarker = '''        public String suspiciousReason = "";
+        public int selectedIndex = -1;
+'''
+            if (!q.contains(fieldMarker)) throw new GradleException("v0.32: decision fields marker missing")
+            q = q.replace(fieldMarker, '''        public String suspiciousReason = "";
+        public int selectedIndex = -1;
+        public boolean primaryGuardedV032;
+''')
+
+            String detailMarker = '''                    + ";suspicious=" + suspicious
+                    + ";reason=" + suspiciousReason;'''
+            if (q.contains(detailMarker)) {
+                q = q.replace(detailMarker, '''                    + ";suspicious=" + suspicious
+                    + ";reason=" + suspiciousReason
+                    + ";primaryGuardV032=" + primaryGuardedV032;''')
+            }
+        }
+
+        if (!q.contains("shouldKeepPrimaryV032(state")) {
+            String selectionMarker = '''        out.selected = bestText;
+        out.selectedIndex = bestIndex;
+'''
+            if (!q.contains(selectionMarker)) throw new GradleException("v0.32: selection marker missing")
+            q = q.replace(selectionMarker, '''        String primaryTextV032 = safe(candidates.get(0)).trim();
+        float primaryConfidenceV032 = confidence != null && confidence.length > 0 ? confidence[0] : -1f;
+        if (bestIndex > 0 && shouldKeepPrimaryV032(state, primaryTextV032, bestText,
+                primaryConfidenceV032, bestConfidence)) {
+            bestText = primaryTextV032;
+            bestIndex = 0;
+            bestConfidence = primaryConfidenceV032;
+            out.primaryGuardedV032 = true;
+        }
+
+        out.selected = bestText;
+        out.selectedIndex = bestIndex;
+''')
+        }
+
+        if (!q.contains("private static boolean shouldKeepPrimaryV032")) {
+            String helperMarker = '''    private static double languagePlausibility(String c, State state) {'''
+            if (!q.contains(helperMarker)) throw new GradleException("v0.32: candidate helper marker missing")
+            String helper = '''    private static boolean shouldKeepPrimaryV032(State state, String primary, String candidate,
+                                                        float primaryConfidence, float candidateConfidence) {
+        if (state != State.FREE_TALK && state != State.MAIL) return false;
+        String p = compactV032(primary), c = compactV032(candidate);
+        if (p.isEmpty() || c.isEmpty() || p.equals(c)) return false;
+
+        // A genuine radio-name completion is one of the places where context can safely beat a
+        // slightly stronger acoustic primary. Do not suppress that useful structured completion.
+        if (state == State.MAIL && !p.contains("ラジオネーム") && c.contains("ラジオネーム")
+                && c.length() >= p.length() + 4) return false;
+
+        boolean strongCanonical = introducesStrongCanonicalV032(p, c);
+        double gain = (primaryConfidence >= 0f && candidateConfidence >= 0f)
+                ? candidateConfidence - primaryConfidence : 0.0;
+
+        // Canonical title already correct in the primary: never trade it for a near-homophone.
+        if ((p.contains("ケレケレ") || p.contains("けれけれ"))
+                && !(c.contains("ケレケレ") || c.contains("けれけれ"))) return true;
+        if (p.contains("聞いてくれ") && c.contains("聞いていける") && !strongCanonical) return true;
+
+        // In ordinary free talk, a lower-confidence alternative should not win solely because a
+        // show-specific scorer likes one of its words. Strong canonical improvements are exempt.
+        if (state == State.FREE_TALK && !strongCanonical && gain <= -0.008) return true;
+        if (state == State.MAIL && !strongCanonical && gain <= -0.035) return true;
+
+        // Content truncation: a tiny confidence gain is not enough to discard the tail of the
+        // recognizer's primary hypothesis. Case/spacing differences are normalized above.
+        if (c.length() + 2 <= p.length() && p.startsWith(c) && gain < 0.060) return true;
+        if (c.length() + 3 <= p.length() && p.contains(c) && gain < 0.040) return true;
+
+        // Very short utterances are especially vulnerable to context hallucination. Require a
+        // meaningful acoustic advantage before accepting a semantically distant alternative.
+        if (p.length() <= 18 && !strongCanonical && similarityV032(p, c) < 0.60 && gain < 0.025)
+            return true;
+        return false;
+    }
+
+    private static boolean introducesStrongCanonicalV032(String primary, String candidate) {
+        String[] terms = {"永田詩央里", "ノットイコールミー", "けれけれ", "ケレケレ",
+                "ラジオ猫", "永田ラジオ", "しおりん聞いてけれ"};
+        for (String term : terms) {
+            if (!primary.contains(term) && candidate.contains(term)) return true;
+        }
+        return false;
+    }
+
+    private static String compactV032(String s) {
+        String x = safe(s);
+        StringBuilder b = new StringBuilder(x.length());
+        for (int i = 0; i < x.length(); i++) {
+            char ch = x.charAt(i);
+            if (Character.isWhitespace(ch)) continue;
+            if ("、。！？!?，,.・･：:；;\\\"'’「」『』()（）".indexOf(ch) >= 0) continue;
+            b.append(Character.toLowerCase(ch));
+        }
+        return b.toString();
+    }
+
+    private static double similarityV032(String a, String b) {
+        if (a.equals(b)) return 1.0;
+        int[] prev = new int[b.length() + 1], cur = new int[b.length() + 1];
+        for (int j = 0; j <= b.length(); j++) prev[j] = j;
+        for (int i = 1; i <= a.length(); i++) {
+            cur[0] = i;
+            for (int j = 1; j <= b.length(); j++) {
+                int cost = a.charAt(i - 1) == b.charAt(j - 1) ? 0 : 1;
+                cur[j] = Math.min(Math.min(cur[j - 1] + 1, prev[j] + 1), prev[j - 1] + cost);
+            }
+            int[] t = prev; prev = cur; cur = t;
+        }
+        return Math.max(0.0, 1.0 - prev[b.length()] / (double)Math.max(a.length(), b.length()));
+    }
+
+'''
+            q = q.replace(helperMarker, helper + helperMarker)
+        }
+        decisionFile.write(q, "UTF-8")
+
+        // -----------------------------------------------------------------------------
+        // 2) Correction-chain short-text rollback. v0.29 remains the first safety layer; v0.32
+        // adds the diagnostic-specific short-utterance guard after it. Learned dictionary output
+        // receives the same guard before it enters ContextCorrectionEngine.
+        // -----------------------------------------------------------------------------
+        File contextFile = file("src/main/java/com/example/radikotranscriber/ContextCorrectionEngine.java")
+        String c = contextFile.getText("UTF-8")
+        String oldReturn = '''        String cleaned = cleanupSpacing(s);
+        return CorrectionSafetyV029.choose(segment, cleaned, program);
+    }
+'''
+        if (!c.contains("CorrectionSafetyV032.choose(segment")) {
+            if (!c.contains(oldReturn)) throw new GradleException("v0.32: context safety marker missing")
+            c = c.replace(oldReturn, '''        String cleaned = cleanupSpacing(s);
+        String safeV029 = CorrectionSafetyV029.choose(segment, cleaned, program);
+        return CorrectionSafetyV032.choose(segment, safeV029, program);
+    }
+''')
+        }
+        contextFile.write(c, "UTF-8")
+
+        File episodeFile = file("src/main/java/com/example/radikotranscriber/EpisodeStore.java")
+        String e = episodeFile.getText("UTF-8")
+        String applyOld = '''    public String applyCorrections(String program, String text) {
+        String candidate = CorrectionSanitizer.applySinglePass(getCorrections(program), text);
+        return CorrectionSafetyV029.choose(text, candidate, program);
+    }
+'''
+        if (!e.contains("CorrectionSafetyV032.choose(text")) {
+            if (!e.contains(applyOld)) throw new GradleException("v0.32: dictionary safety marker missing")
+            e = e.replace(applyOld, '''    public String applyCorrections(String program, String text) {
+        String candidate = CorrectionSanitizer.applySinglePass(getCorrections(program), text);
+        String safeV029 = CorrectionSafetyV029.choose(text, candidate, program);
+        return CorrectionSafetyV032.choose(text, safeV029, program);
+    }
+''')
+        }
+        episodeFile.write(e, "UTF-8")
+
+        // Keep the visible in-app revision text current without touching the stable UI structure.
+        File mainLayout = file("src/main/res/layout/activity_main.xml")
+        String x = mainLayout.getText("UTF-8")
+        x = x.replaceAll('android:text="v0\\.[0-9]+[^\"]*"',
+                'android:text="v0.32  •  候補悪化ガード / 回名復元 / 過去回再処理"')
+        mainLayout.write(x, "UTF-8")
+    }
+}
