@@ -1,0 +1,63 @@
+name: Inspect social archive pagination
+on:
+  push:
+    branches: ["shiori-archive-mvp"]
+    paths: ['.github/workflows/inspect-social-archives.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: Inspect Sotwe profile HTML
+        run: |
+          python3 - <<'PY'
+          import re,urllib.request,html
+          U='https://www.sotwe.com/nagata_shiori_'
+          req=urllib.request.Request(U,headers={'User-Agent':'Mozilla/5.0','Accept-Language':'ja,en;q=0.8'})
+          b=urllib.request.urlopen(req,timeout=20).read().decode('utf-8','replace')
+          print('SOTWE_LEN',len(b))
+          pats=[r'href=["\']([^"\']+)["\']',r'(?:api|ajax|cursor|timeline|load.?more|next|page)[^\n]{0,180}',r'/nagata_shiori_/[^"\'<> ]+',r'status/\d{15,22}',r'cursor[^,}\]]{0,120}']
+          for p in pats:
+            vals=[]
+            for x in re.findall(p,b,re.I):
+              x=html.unescape(x if isinstance(x,str) else ''.join(x))
+              if x not in vals:vals.append(x)
+            print('PATTERN',p,'COUNT',len(vals))
+            for x in vals[:80]:print(' ',x[:350])
+          for s in re.findall(r'<script[^>]*src=["\']([^"\']+)',b,re.I):print('SCRIPT',s)
+          open('/tmp/sotwe.html','w').write(b)
+          PY
+      - name: Inspect Instagram public HTML
+        continue-on-error: true
+        run: |
+          python3 - <<'PY'
+          import re,urllib.request,html
+          urls=['https://www.instagram.com/nagata__shiori/','https://www.instagram.com/nagata__shiori/?__a=1&__d=dis']
+          for U in urls:
+            try:
+              req=urllib.request.Request(U,headers={'User-Agent':'Mozilla/5.0','Accept-Language':'ja,en;q=0.8'})
+              b=urllib.request.urlopen(req,timeout=20).read().decode('utf-8','replace')
+              print('IG_URL',U,'LEN',len(b),'POST_CODES',len(set(re.findall(r'"shortcode"\s*:\s*"([A-Za-z0-9_-]+)',b))))
+              for p in [r'"shortcode"\s*:\s*"([A-Za-z0-9_-]+)',r'instagram\.com/(?:p|reel)/([A-Za-z0-9_-]+)',r'"edge_owner_to_timeline_media".{0,200}',r'"end_cursor"\s*:\s*"([^"]+)"',r'"count"\s*:\s*(\d+)']:
+                vals=list(dict.fromkeys(re.findall(p,b,re.I|re.S)))
+                print(' IGPAT',p,'COUNT',len(vals),'SAMPLE',vals[:20])
+            except Exception as e:print('IG_ERROR',U,repr(e))
+          PY
+      - name: Inspect Instagrammer News links
+        run: |
+          python3 - <<'PY'
+          import re,urllib.request,html
+          U='https://instagrammernews.com/user/58749300526'
+          req=urllib.request.Request(U,headers={'User-Agent':'Mozilla/5.0'})
+          b=urllib.request.urlopen(req,timeout=20).read().decode('utf-8','replace')
+          print('IGN_LEN',len(b))
+          vals=list(dict.fromkeys(re.findall(r'href=["\']([^"\']+)["\']',b,re.I)))
+          for x in vals:
+            if any(z in x.lower() for z in ('detail','more','page','user/58749300526')):print('IGN_LINK',html.unescape(x))
+          for p in [r'(?:ajax|api|load|more|page)[^\n]{0,250}',r'/detail/(\d{10,24})']:
+            m=list(dict.fromkeys(re.findall(p,b,re.I)))
+            print('IGN_PAT',p,'COUNT',len(m),'SAMPLE',m[:80])
+          PY
