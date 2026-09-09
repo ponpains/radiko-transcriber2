@@ -1,0 +1,197 @@
+name: Build Shiori Archive v0.9.6 repair expand and media filters
+on:
+  workflow_dispatch:
+  push:
+    branches: ["shiori-archive-mvp"]
+    paths:
+      - '.github/workflows/build-shiori-v096.yml'
+      - 'shiori-archive/scripts/repair_expand_v096.py'
+permissions:
+  contents: read
+  actions: read
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    steps:
+      - uses: actions/checkout@v4
+      - name: Restore v0.9.5 seed
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          curl -fL -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" -H "X-GitHub-Api-Version: 2022-11-28" "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/artifacts/10087679591/zip" -o v095.zip
+          unzip -q v095.zip -d v095
+          APK=$(find v095 -type f -name 'shiori-archive-v0.9.5.apk' | head -1)
+          test -s "$APK"
+          mkdir -p shiori-archive/app/src/main/assets
+          unzip -p "$APK" assets/archive_seed.json > shiori-archive/app/src/main/assets/archive_seed.json
+      - name: Repair duplicates and expand public archive
+        run: python3 shiori-archive/scripts/repair_expand_v096.py
+      - name: Add one-tap media filters and Instagram fallback sources
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('shiori-archive/app/src/main/java/com/ponpains/shioriarchive/MainActivity.java')
+          s=p.read_text(encoding='utf-8')
+          if 'String searchTypeFilter=' not in s:
+              s=s.replace('    int currentPage=PAGE_HOME;\n','    int currentPage=PAGE_HOME;\n    String searchTypeFilter="";\n')
+          start=s.index('    void search(){')
+          end=s.index('    View compactCard(',start)
+          block=r'''    void search(){
+              currentPage=PAGE_SEARCH;
+              LinearLayout body=col();
+              body.addView(tx("検索",25,INK,true));
+              body.addView(tx("キーワードと媒体を組み合わせて絞り込めます",11,MUTED,false));
+              EditText q=new EditText(this);
+              q.setHint("例：ラジオ / 鈴木瞳美 / ぼのぼの");
+              q.setSingleLine();
+              q.setBackground(bg(CARD,14,LINE));
+              q.setPadding(dp(13),0,dp(13),0);
+              LinearLayout.LayoutParams p=new LinearLayout.LayoutParams(-1,dp(48));
+              p.setMargins(0,dp(10),0,dp(7));
+              body.addView(q,p);
+
+              HorizontalScrollView hs=new HorizontalScrollView(this);
+              hs.setHorizontalScrollBarEnabled(false);
+              LinearLayout filters=new LinearLayout(this);
+              filters.setOrientation(LinearLayout.HORIZONTAL);
+              filters.setPadding(0,0,0,dp(4));
+              String[] labels={"すべて","X","Instagram","TikTok","インタビュー","SHOWROOM","YouTube","ラジオ","テレビ","イベント"};
+              for(String label:labels){
+                  Button chip=new Button(this);
+                  chip.setText(label);
+                  chip.setTag(label);
+                  chip.setAllCaps(false);
+                  chip.setTextSize(11);
+                  chip.setMinHeight(0);chip.setMinimumHeight(0);chip.setMinWidth(0);chip.setMinimumWidth(0);
+                  chip.setPadding(dp(12),0,dp(12),0);
+                  boolean selected=(searchTypeFilter.isEmpty()&&label.equals("すべて"))||label.equals(searchTypeFilter);
+                  chip.setTextColor(selected?ACCENT:INK);
+                  chip.setBackground(bg(selected?SOFT:CARD,14,selected?ACCENT:LINE));
+                  LinearLayout.LayoutParams cp=new LinearLayout.LayoutParams(-2,dp(38));
+                  cp.setMargins(0,0,dp(6),0);
+                  filters.addView(chip,cp);
+              }
+              hs.addView(filters,new HorizontalScrollView.LayoutParams(-2,-2));
+              body.addView(hs,new LinearLayout.LayoutParams(-1,dp(44)));
+
+              TextView count=tx("",11,MUTED,false);
+              body.addView(count);
+              LinearLayout out=col();
+              body.addView(out);
+              renderResults("",searchTypeFilter,out,count);
+
+              for(int i=0;i<filters.getChildCount();i++){
+                  View child=filters.getChildAt(i);
+                  if(!(child instanceof Button))continue;
+                  Button chip=(Button)child;
+                  chip.setOnClickListener(v->{
+                      String label=String.valueOf(chip.getTag());
+                      searchTypeFilter=label.equals("すべて")?"":label;
+                      for(int j=0;j<filters.getChildCount();j++){
+                          View c=filters.getChildAt(j);
+                          if(!(c instanceof Button))continue;
+                          Button b=(Button)c;
+                          String l=String.valueOf(b.getTag());
+                          boolean sel=(searchTypeFilter.isEmpty()&&l.equals("すべて"))||l.equals(searchTypeFilter);
+                          b.setTextColor(sel?ACCENT:INK);
+                          b.setBackground(bg(sel?SOFT:CARD,14,sel?ACCENT:LINE));
+                      }
+                      renderResults(q.getText().toString(),searchTypeFilter,out,count);
+                  });
+              }
+              q.addTextChangedListener(new TextWatcher(){
+                  public void beforeTextChanged(CharSequence s,int a,int c,int d){}
+                  public void onTextChanged(CharSequence s,int a,int c,int d){renderResults(s.toString(),searchTypeFilter,out,count);}
+                  public void afterTextChanged(Editable e){}
+              });
+              screen(scroll(body));
+          }
+
+          boolean mediaMatches(ArchiveEvent e,String filter){
+              if(filter==null||filter.isEmpty())return true;
+              if(filter.equals("イベント"))return e.type.equals("イベント")||e.type.equals("イベント告知")||e.type.equals("ライブ/イベント");
+              if(filter.equals("ラジオ"))return e.type.equals("ラジオ")||e.type.equals("ラジオ告知");
+              return e.type.equalsIgnoreCase(filter);
+          }
+
+          void renderResults(String query,String filter,LinearLayout out,TextView count){
+              out.removeAllViews();
+              List<ArchiveEvent> hits=new ArrayList<>();
+              for(ArchiveEvent e:events){
+                  if(!mediaMatches(e,filter)||!e.matches(query))continue;
+                  hits.add(e);
+              }
+              Collections.sort(hits);
+              int limit=query.trim().isEmpty()?100:300;
+              int shown=Math.min(limit,hits.size());
+              for(int i=0;i<shown;i++)out.addView(compactCard(hits.get(i),true));
+              String label=(filter==null||filter.isEmpty())?"すべて":filter;
+              count.setText(label+"  "+hits.size()+"件"+(hits.size()>shown?"  ·  新しい順に"+shown+"件表示":""));
+              if(hits.isEmpty()){
+                  TextView none=tx("該当する記録はありません",12,MUTED,false);
+                  none.setPadding(dp(8),dp(13),0,0);
+                  out.addView(none);
+              }
+          }
+
+'''
+          s=s[:start]+block+s[end:]
+          p.write_text(s,encoding='utf-8')
+
+          a=Path('shiori-archive/app/src/main/java/com/ponpains/shioriarchive/ArchiveEvent.java')
+          t=a.read_text(encoding='utf-8')
+          old='''        if ("Instagram".equalsIgnoreCase(type)) {\n            if (!lower.matches("https?://(www\\\\.)?instagram\\\\.com/(p|reel|tv)/[^/?#]+.*")) return "";\n            return url;\n        }'''
+          new='''        if ("Instagram".equalsIgnoreCase(type)) {\n            if (lower.matches("https?://(www\\\\.)?instagram\\\\.com/(p|reel|tv)/[^/?#]+.*")) return url;\n            if (lower.matches("https?://(www\\\\.)?instagrammernews\\\\.com/detail/\\\\d+.*")) return url;\n            return "";\n        }'''
+          if old not in t: raise SystemExit('Instagram sanitize block not found')
+          a.write_text(t.replace(old,new),encoding='utf-8')
+          PY
+      - name: Set version and freeze snapshot
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          p=Path('shiori-archive/app/build.gradle');s=p.read_text();s=re.sub(r'versionCode\s+\d+','versionCode 19',s);s=re.sub(r'versionName\s+"[^"]+"','versionName "0.9.6"',s);p.write_text(s)
+          r=Path('shiori-archive/app/src/main/java/com/ponpains/shioriarchive/ArchiveRepository.java');t=r.read_text();t=t.replace('shiori-archive/data/','shiori-archive/stop/');t=re.sub(r'ShioriArchive/0\\.[0-9.]+','ShioriArchive/0.9.6',t);r.write_text(t)
+          PY
+      - name: Verify repaired corpus
+        run: |
+          python3 - <<'PY'
+          import json,re,collections
+          p='shiori-archive/app/src/main/assets/archive_seed.json';d=json.load(open(p,encoding='utf-8'));ev=d['events'];x=[e for e in ev if e.get('type')=='X']
+          ids=[]
+          for e in x:
+              m=re.search(r'https://x\.com/nagata_shiori_/status/(\d+)$',e.get('sourceUrl','') or '')
+              if m:ids.append(m.group(1))
+              elif not (e.get('excerpt') or '').strip():raise SystemExit('content-only X without text')
+          if len(ids)!=len(set(ids)):raise SystemExit('duplicate direct status ID')
+          print('TOTAL',len(ev),'X',len(x),'DIRECT',len(ids),'CONTENT_ONLY',len(x)-len(ids),'X_TEXT',sum(bool((e.get('excerpt') or '').strip()) for e in x))
+          print('TYPES',dict(collections.Counter(e.get('type','') for e in ev)))
+          print(open('shiori-archive/app/src/main/assets/archive_v096_report.json',encoding='utf-8').read())
+          PY
+      - uses: actions/setup-java@v4
+        with: {distribution: temurin, java-version: '17'}
+      - uses: gradle/actions/setup-gradle@v4
+        with: {gradle-version: '8.10.2'}
+      - name: Restore signing key
+        run: |
+          python3 - <<'PY'
+          import base64,pathlib
+          text=pathlib.Path('.github/workflows/build-apk.yml').read_text();line=next(x.strip() for x in text.splitlines() if x.strip().startswith("echo '") and 'base64 --decode > debug.keystore' in x);payload=line.split("echo '",1)[1].split("' | base64",1)[0];pathlib.Path('shiori-archive/debug.keystore').write_bytes(base64.b64decode(payload))
+          PY
+          test "$(sha256sum shiori-archive/debug.keystore | awk '{print $1}')" = "61cf96e814e00aa9238125a6b533cedfd476c8790e401c77167dc9e4d8d06664"
+      - name: Build APK
+        run: gradle -p shiori-archive :app:assembleDebug
+      - name: Verify APK
+        run: |
+          APK=shiori-archive/app/build/outputs/apk/debug/app-debug.apk;test -s "$APK"
+          AAPT=$(find "$ANDROID_HOME/build-tools" -type f -name aapt | sort -V | tail -1);APKSIGNER=$(find "$ANDROID_HOME/build-tools" -type f -name apksigner | sort -V | tail -1)
+          "$APKSIGNER" verify --verbose --print-certs "$APK";"$AAPT" dump badging "$APK" | head -5
+          cp "$APK" shiori-archive-v0.9.6.apk;sha256sum shiori-archive-v0.9.6.apk > shiori-archive-v0.9.6.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: shiori-archive-v0.9.6
+          path: |
+            shiori-archive-v0.9.6.apk
+            shiori-archive/app/src/main/assets/archive_v096_report.json
+            shiori-archive-v0.9.6.sha256
