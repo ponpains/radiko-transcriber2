@@ -63,5 +63,7 @@ apply from: 'v029-source-patch.gradle'
 ext.CorrectionSanitizer = [VERSION: 'correction-sanitizer-v030-2026-09-08']
 apply from: 'v030-source-patch.gradle'
 apply from: 'v030-followup.gradle'
+apply from: 'v031-prefields.gradle'
+apply from: 'v031-precompat.gradle'
 apply from: 'v031-source-patch.gradle'
 apply from: 'v031-followup.gradle'
