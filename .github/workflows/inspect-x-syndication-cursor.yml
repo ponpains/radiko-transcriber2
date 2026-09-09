@@ -1,0 +1,58 @@
+name: Inspect X syndication timeline cursors
+on:
+  workflow_dispatch:
+  push:
+    branches: ["shiori-archive-mvp"]
+    paths: ['.github/workflows/inspect-x-syndication-cursor.yml']
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: Inspect public syndication response
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json,re,urllib.request,urllib.error,time
+          U='https://syndication.twitter.com/srv/timeline-profile/screen-name/nagata_shiori_?dnt=true'
+          def fetch(u):
+            for i in range(4):
+              try:
+                req=urllib.request.Request(u,headers={'User-Agent':'Mozilla/5.0 ShioriArchive/0.9.5'})
+                return urllib.request.urlopen(req,timeout=30).read().decode('utf-8','replace')
+              except urllib.error.HTTPError as e:
+                print('HTTP',e.code,'attempt',i+1)
+                if e.code==429:time.sleep(45*(i+1));continue
+                raise
+            return ''
+          s=fetch(U);print('HTML_BYTES',len(s))
+          m=re.search(r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>',s,re.S)
+          obj=json.loads(m.group(1)) if m else {}
+          found=[]
+          def walk(x,path='root'):
+            if isinstance(x,dict):
+              for k,v in x.items():
+                p=path+'.'+k
+                kl=k.lower()
+                if any(q in kl for q in ('cursor','position','timeline','entry','page','token')) and not isinstance(v,(dict,list)):
+                  found.append((p,str(v)[:500]))
+                walk(v,p)
+            elif isinstance(x,list):
+              for i,v in enumerate(x[:500]):walk(v,path+f'[{i}]')
+          walk(obj)
+          print('CURSORISH_COUNT',len(found))
+          for p,v in found[:200]:print('CURSORISH',p,'=',v)
+          # Find all status IDs too for sanity.
+          ids=set(re.findall(r'nagata_shiori_[\\/]+status[\\/]+(\d{15,22})',s,re.I))
+          ids.update(re.findall(r'(?:x|twitter)\.com/nagata_shiori_/(?:status|statuses)/(\d{15,22})',s,re.I))
+          print('STATUS_IDS_REGEX',len(ids))
+          # Print top-level object shapes, not tweet text.
+          def shape(x,depth=0):
+            if depth>3:return type(x).__name__
+            if isinstance(x,dict):return {k:shape(v,depth+1) for k,v in list(x.items())[:80]}
+            if isinstance(x,list):return [shape(x[0],depth+1)] if x else []
+            return type(x).__name__
+          print('SHAPE',json.dumps(shape(obj),ensure_ascii=False)[:15000])
+          PY
