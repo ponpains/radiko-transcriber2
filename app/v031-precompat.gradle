@@ -1,0 +1,17 @@
+// Runs immediately before v031-source-patch. Older source patches may add cleanup lines inside
+// MainActivity.onDestroy(), so seed the v0.31 callback cleanup next to unregisterReceiver without
+// replacing or removing any existing cleanup behavior.
+tasks.named("preBuild").configure {
+    doLast {
+        File mainFile = file("src/main/java/com/example/radikotranscriber/MainActivity.java")
+        String m = mainFile.getText("UTF-8")
+        String cleanup = '''        metaSaveHandlerV031.removeCallbacks(metaSaveRunnableV031);
+        try { unregisterReceiver(receiver);'''
+        if (!m.contains(cleanup)) {
+            String marker = '''        try { unregisterReceiver(receiver);'''
+            if (!m.contains(marker)) throw new GradleException("v0.31 precompat: unregister marker missing")
+            m = m.replace(marker, cleanup)
+        }
+        mainFile.write(m, "UTF-8")
+    }
+}

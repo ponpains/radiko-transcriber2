@@ -1,0 +1,22 @@
+// Runs before v031-precompat and v031-source-patch. The compatibility cleanup needs the metadata
+// handler symbols to exist in the final generated MainActivity, so seed exactly the same fields the
+// main v0.31 patch would otherwise add.
+tasks.named("preBuild").configure {
+    doLast {
+        File mainFile = file("src/main/java/com/example/radikotranscriber/MainActivity.java")
+        String m = mainFile.getText("UTF-8")
+        if (!m.contains("metaSaveHandlerV031")) {
+            String fields = '''    private String lastServiceText = "";
+    private long lastUiDiagnosticAt = 0L;
+'''
+            if (!m.contains(fields)) throw new GradleException("v0.31 prefields: metadata fields marker missing")
+            m = m.replace(fields, '''    private String lastServiceText = "";
+    private long lastUiDiagnosticAt = 0L;
+    private boolean applyingMetaUiV031 = false;
+    private final Handler metaSaveHandlerV031 = new Handler(Looper.getMainLooper());
+    private final Runnable metaSaveRunnableV031 = () -> saveMetadataV031("debounce");
+''')
+        }
+        mainFile.write(m, "UTF-8")
+    }
+}
