@@ -6,6 +6,7 @@ on:
     paths:
       - '.github/workflows/build-shiori-v096.yml'
       - 'shiori-archive/scripts/repair_expand_v096.py'
+      - 'shiori-archive/scripts/repair_expand_v096_fast.py'
       - 'shiori-archive/scripts/patch_ui_v096.py'
 permissions:
   contents: read
@@ -13,7 +14,7 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 55
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - name: Restore v0.9.5 seed
@@ -27,7 +28,7 @@ jobs:
           mkdir -p shiori-archive/app/src/main/assets
           unzip -p "$APK" assets/archive_seed.json > shiori-archive/app/src/main/assets/archive_seed.json
       - name: Repair duplicates and expand public archive
-        run: python3 shiori-archive/scripts/repair_expand_v096.py
+        run: python3 shiori-archive/scripts/repair_expand_v096_fast.py
       - name: Add one-tap media filters
         run: python3 shiori-archive/scripts/patch_ui_v096.py
       - name: Set version and freeze snapshot
