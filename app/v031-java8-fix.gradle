@@ -1,0 +1,25 @@
+// Final v0.31 compile compatibility pass. Avoid regex/backslash escaping in the helper inserted by
+// v031-source-patch because this project intentionally compiles with Java sourceCompatibility 1.8.
+tasks.named("preBuild").configure {
+    doLast {
+        File decisionFile = file("src/main/java/com/example/radikotranscriber/KerekereCandidateDecisionEngine.java")
+        String q = decisionFile.getText("UTF-8")
+        String start = "    private static String compactV031(String s) {"
+        String end = "    private static double languagePlausibility(String c, State state) {"
+        int a = q.indexOf(start)
+        if (a < 0) throw new GradleException("v0.31 java8 fix: compact helper missing")
+        int b = q.indexOf(end, a)
+        if (b < 0) throw new GradleException("v0.31 java8 fix: language helper marker missing")
+        String replacement = '''    private static String compactV031(String s) {
+        return safe(s).replace(" ", "").replace("　", "")
+                .replace("、", "").replace("。", "")
+                .replace("！", "").replace("？", "")
+                .replace("!", "").replace("?", "")
+                .replace(",", "").replace(".", "");
+    }
+
+'''
+        q = q.substring(0, a) + replacement + q.substring(b)
+        decisionFile.write(q, "UTF-8")
+    }
+}
