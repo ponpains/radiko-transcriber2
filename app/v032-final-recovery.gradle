@@ -1,0 +1,14 @@
+// Apply the v0.32 final-only recovery after v0.28 has wrapped the proofreader with mail layout.
+tasks.named("preBuild").configure {
+    doLast {
+        File proofreader = file("src/main/java/com/example/radikotranscriber/TranscriptFinalProofreaderV027.java")
+        String p = proofreader.getText("UTF-8")
+        String oldReturn = '''        return normalize(RadioMailLayoutV028.apply(s));'''
+        String newReturn = '''        return normalize(RadioMailLayoutV028.apply(KerekereFinalRecoveryV032.refine(program, s)));'''
+        if (!p.contains(newReturn)) {
+            if (!p.contains(oldReturn)) throw new GradleException("v0.32 final recovery: proofreader return marker missing")
+            p = p.replace(oldReturn, newReturn)
+        }
+        proofreader.write(p, "UTF-8")
+    }
+}
