@@ -1,0 +1,52 @@
+// v0.31 follow-up: do not overwrite an existing unsaved metadata draft during Activity startup.
+// MainActivity calls newEpisode() before metadata watchers are attached, so startup lifecycle work
+// must not be treated as a user edit.
+tasks.named("preBuild").configure {
+    doLast {
+        File mainFile = file("src/main/java/com/example/radikotranscriber/MainActivity.java")
+        String m = mainFile.getText("UTF-8")
+
+        if (!m.contains("metadataAutosaveReadyV031")) {
+            String fields = '''    private boolean applyingMetaUiV031 = false;
+    private final Handler metaSaveHandlerV031 = new Handler(Looper.getMainLooper());'''
+            if (!m.contains(fields)) throw new GradleException("v0.31 followup: metadata fields marker missing")
+            m = m.replace(fields, '''    private boolean applyingMetaUiV031 = false;
+    private boolean metadataAutosaveReadyV031 = false;
+    private final Handler metaSaveHandlerV031 = new Handler(Looper.getMainLooper());''')
+        }
+
+        if (!m.contains("metadataAutosaveReadyV031 = true;")) {
+            String setupEnd = '''        programInput.addTextChangedListener(watcher);
+        episodeInput.addTextChangedListener(watcher);
+        urlInput.addTextChangedListener(watcher);
+    }
+
+    private void saveMetadataV031'''
+            if (!m.contains(setupEnd)) throw new GradleException("v0.31 followup: setup marker missing")
+            m = m.replace(setupEnd, '''        programInput.addTextChangedListener(watcher);
+        episodeInput.addTextChangedListener(watcher);
+        urlInput.addTextChangedListener(watcher);
+        metadataAutosaveReadyV031 = true;
+    }
+
+    private void saveMetadataV031''')
+        }
+
+        String unsafeDraft = '''        if (activeEpisodeId <= 0) {
+            saveDraftMetadataV031();
+            return;
+        }'''
+        String safeDraft = '''        if (activeEpisodeId <= 0) {
+            if (metadataAutosaveReadyV031) saveDraftMetadataV031();
+            return;
+        }'''
+        if (m.contains(unsafeDraft)) m = m.replace(unsafeDraft, safeDraft)
+
+        String draftGuard = '''        if (programInput == null || episodeInput == null || urlInput == null || applyingMetaUiV031) return;'''
+        String draftGuardNew = '''        if (!metadataAutosaveReadyV031 || programInput == null || episodeInput == null
+                || urlInput == null || applyingMetaUiV031) return;'''
+        if (m.contains(draftGuard)) m = m.replace(draftGuard, draftGuardNew)
+
+        mainFile.write(m, "UTF-8")
+    }
+}
