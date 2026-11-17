@@ -1,0 +1,102 @@
+{
+  "schemaVersion": 1,
+  "updatedAt": "2026-11-18",
+  "events": [
+    {
+      "id": "2026-09-15-ex-taishu",
+      "date": "2026-09-15",
+      "type": "雑誌/連載",
+      "title": "『EX大衆』10月号で永田詩央里の新連載がスタート",
+      "summary": "『私らしい私に会いにいく。≠MEと写真家たち』第1回に登場。写真家・松尾ののと夕暮れから夜へ移る街を歩き、自然体の姿を撮影。誌面インタビューも掲載。",
+      "sourceName": "双葉社／EX大衆",
+      "sourceUrl": "https://t.co/Yrt61UtauZ",
+      "confidence": "発売日・企画内容を複数の媒体記事で確認",
+      "tags": [
+        "EX大衆",
+        "連載",
+        "写真",
+        "松尾のの"
+      ],
+      "people": [
+        "松尾のの"
+      ]
+    },
+    {
+      "id": "2026-11-07-special-live-day1",
+      "date": "2026-11-07",
+      "time": "17:30",
+      "type": "ライブ",
+      "title": "≠ME 特別公演 2026 DAY1",
+      "summary": "京王アリーナTOKYOで開催。永田詩央里を含む≠ME全メンバーが出演。",
+      "sourceName": "KING RECORDS TODAY",
+      "sourceUrl": "https://news.kingrecords.co.jp/2026/11/60635/",
+      "confidence": "公式レーベルの開催後レポート",
+      "tags": [
+        "特別公演2026",
+        "ライブ",
+        "京王アリーナTOKYO"
+      ],
+      "people": [
+        "尾木波菜",
+        "落合希来里",
+        "蟹沢萌子",
+        "河口夏音",
+        "川中子奈月心",
+        "櫻井もも",
+        "鈴木瞳美",
+        "谷崎早耶",
+        "冨田菜々風",
+        "本田珠由記"
+      ]
+    },
+    {
+      "id": "2026-11-08-special-live-day2",
+      "date": "2026-11-08",
+      "time": "16:30",
+      "type": "ライブ",
+      "title": "≠ME 特別公演 2026 DAY2",
+      "summary": "京王アリーナTOKYOで開催。永田詩央里を含む≠ME全メンバーが出演。",
+      "sourceName": "KING RECORDS TODAY",
+      "sourceUrl": "https://news.kingrecords.co.jp/2026/11/60635/",
+      "confidence": "公式レーベルの開催後レポート",
+      "tags": [
+        "特別公演2026",
+        "ライブ",
+        "京王アリーナTOKYO"
+      ],
+      "people": [
+        "尾木波菜",
+        "落合希来里",
+        "蟹沢萌子",
+        "河口夏音",
+        "川中子奈月心",
+        "櫻井もも",
+        "鈴木瞳美",
+        "谷崎早耶",
+        "冨田菜々風",
+        "本田珠由記"
+      ]
+    },
+    {
+      "id": "2026-11-11-besthits",
+      "date": "2026-11-11",
+      "time": "19:00",
+      "type": "テレビ",
+      "title": "読売テレビ・日本テレビ系『ベストヒット歌謡祭2026』出演",
+      "summary": "≠MEとして初出演。『愛くださいませ』を披露し、ヒットダンスメドレーでは＝LOVEとともに中島健人『最初はキュン！』をパフォーマンス。",
+      "sourceName": "≠ME公式SCHEDULE",
+      "sourceUrl": "https://not-equal-me.jp/schedule/detail/8042",
+      "confidence": "一次情報",
+      "tags": [
+        "ベストヒット歌謡祭",
+        "テレビ",
+        "愛くださいませ",
+        "最初はキュン！"
+      ],
+      "people": [
+        "≠ME",
+        "＝LOVE"
+      ]
+    }
+  ]
+}
