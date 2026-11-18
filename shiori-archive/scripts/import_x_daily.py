@@ -70,5 +70,5 @@ else:
 meta = payload.get("meta", {})
 new_since = meta.get("newest_id") or cursor.get("since_id")
 if new_since:
-    CURSOR.write_text(json.dumps({"since_id": str(new_since), "updatedAt": datetime.now(timezone.utc).isoformat()}, ensure_ascii=False, indent=2) + "\n", "utf-8")
+    CURSOR.write_text(json.dumps({"since_id": str(new_since), "user_id": str(uid), "updatedAt": datetime.now(timezone.utc).isoformat()}, ensure_ascii=False, indent=2) + "\n", "utf-8")
 print(f"Checked @{user['data'].get('username')}: fetched={len(posts)} added={len(added)}")
