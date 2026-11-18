@@ -24,7 +24,8 @@ jobs:
       - name: Import new public posts
         run: |
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
-          "$(go env GOPATH)/bin/x" timeline nagata_shiori_ -o jsonl -n 100 > /tmp/shiori-x.jsonl
+          export PATH="$(go env GOPATH)/bin:$PATH"
+          x timeline nagata_shiori_ -o jsonl -n 100 > /tmp/shiori-x.jsonl
           test -s /tmp/shiori-x.jsonl
           python3 shiori-archive/scripts/import_x_daily.py
       - name: Commit archive changes
