@@ -4,23 +4,6 @@
   "notice": "本人Xの公開投稿。確認できた原文の短い抜粋と個別投稿への導線を掲載。",
   "events": [
     {
-      "id": "x-2026-10-16-seat-cushion",
-      "date": "2026-10-16",
-      "time": "",
-      "type": "X",
-      "title": "隣の席には大きな座布団",
-      "summary": "",
-      "excerpt": "私の隣の席には、大きな座布団が座ってくれています♪ひとりじゃない！",
-      "sourceName": "X @nagata_shiori_",
-      "sourceUrl": "https://x.com/nagata_shiori_/status/2111821968966316081",
-      "confidence": "本人投稿・原文確認（投稿IDはミラーのページカーソル由来のため要再照合）",
-      "tags": [
-        "けれけれ",
-        "座布団"
-      ],
-      "people": []
-    },
-    {
       "id": "x-2026-10-22-link-photo",
       "date": "2026-10-22",
       "time": "23:38",
@@ -40,7 +23,7 @@
     {
       "id": "x-2026-10-23-kerekere-70",
       "date": "2026-10-23",
-      "time": "",
+      "time": "23:16",
       "type": "X",
       "title": "けれけれ70回記念放送",
       "summary": "",
@@ -71,44 +54,6 @@
       ],
       "people": [
         "蟹沢萌子"
-      ]
-    },
-    {
-      "id": "x-2026-11-08-special-live",
-      "date": "2026-11-08",
-      "time": "",
-      "type": "X",
-      "title": "≠ME 特別公演2026 DAY2を終えて",
-      "summary": "",
-      "excerpt": "#ノイミー特別公演2026 2日目💎 たくさんのラブを届けてくれて、本当にありがとうー！！私もとびっきりの愛と感謝を込めてお届けしました💌 この2日間が楽しすぎて幸せすぎて、改めて≠MEとファンのみなさんのことが大切で大好きだなって実感したんだ！ この先も、君がアクセントなんだよ💎",
-      "sourceName": "X @nagata_shiori_",
-      "sourceUrl": "https://x.com/nagata_shiori_/status/212?x=1",
-      "confidence": "本人投稿・原文確認（個別ID未確認）",
-      "tags": [
-        "特別公演2026",
-        "ライブ"
-      ],
-      "people": [
-        "≠ME"
-      ]
-    },
-    {
-      "id": "x-2026-11-11-besthits",
-      "date": "2026-11-11",
-      "time": "",
-      "type": "X",
-      "title": "ベストヒット歌謡祭2026出演後",
-      "summary": "",
-      "excerpt": "#ベストヒット歌謡祭 2026 ありがとうございました！ #愛くださいませ 気合いを入れてお届けさせていただきました🥀🥀🥀ヒットメドレーもわくわくする時間でした🪩 ノイミーちゃんに愛くださいませ💌 #ノイミー",
-      "sourceName": "X @nagata_shiori_",
-      "sourceUrl": "https://x.com/nagata_shiori_/status/212?x=1",
-      "confidence": "本人投稿・原文確認（個別ID未確認）",
-      "tags": [
-        "ベストヒット歌謡祭",
-        "愛くださいませ"
-      ],
-      "people": [
-        "≠ME"
       ]
     },
     {
