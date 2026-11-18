@@ -4,7 +4,7 @@ This workflow checks the public timeline of @nagata_shiori_ once per day and add
 
 ## One-time requirement
 
-Add a repository Actions secret named `X_BEARER_TOKEN` containing an X API v2 Bearer Token. X does not provide a dependable free public timeline feed; the importer deliberately uses the official API rather than brittle HTML scraping or unofficial mirrors. Without this secret the workflow stops with a clear error and does not change archive data.
+Add a repository Actions secret named `X_BEARER_TOKEN` containing an X API v2 Bearer Token. X does not provide a dependable free public timeline feed; the importer deliberately uses the official API rather than brittle HTML scraping or unofficial mirrors. Without this secret the workflow stops with a clear error and does not change archive data. X currently lists Posts: Read at $0.005 per fetched post and User: Read at $0.010; the user lookup is performed only on the first successful run and its ID is cached. Actual daily cost depends on how many posts the account published since the previous run. Check the current [X Developer Platform pricing](https://developer.x.com/) before enabling billing.
 
 ## Run / verify
 
