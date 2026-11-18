@@ -1,0 +1,36 @@
+name: Daily Shiori X archive sync
+on:
+  schedule:
+    - cron: "35 21 * * *"
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: shiori-x-daily-sync
+  cancel-in-progress: false
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: shiori-archive-mvp
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Import new public posts
+        env:
+          X_BEARER_TOKEN: ${{ secrets.X_BEARER_TOKEN }}
+        run: python3 shiori-archive/scripts/import_x_daily.py
+      - name: Commit archive changes
+        run: |
+          if git diff --quiet; then
+            echo "No archive changes."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add shiori-archive/data
+          git commit -m "Daily sync: Shiori X archive"
+          git push origin HEAD:shiori-archive-mvp
