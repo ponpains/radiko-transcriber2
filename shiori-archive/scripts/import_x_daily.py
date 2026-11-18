@@ -1,74 +1,71 @@
 #!/usr/bin/env python3
-"""Daily importer for public posts by @nagata_shiori_ using the official X API v2."""
-import json, os, re, sys, urllib.parse, urllib.request
+"""Import public posts from @nagata_shiori_ using x-cli's free public syndication surface."""
+import json, re, subprocess, sys
 from datetime import datetime, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
-ROOT = Path("shiori-archive/data")
-MANIFEST = ROOT / "manifest.json"
-CURSOR = ROOT / "x_cursor.json"
-OUT = ROOT / "x_2026_oct_nov_recent.json"
-TOKEN = os.environ.get("X_BEARER_TOKEN", "").strip()
-if not TOKEN:
-    raise SystemExit("Missing X_BEARER_TOKEN repository secret. Add an X API Bearer Token to enable daily imports.")
+ROOT=Path("shiori-archive/data")
+OUT=ROOT/"x_2026_oct_nov_recent.json"
+MANIFEST=ROOT/"manifest.json"
+cmd=["x","timeline","nagata_shiori_","-o","jsonl","-n","100"]
+p=subprocess.run(cmd,text=True,capture_output=True,timeout=90)
+if p.returncode:
+    print(p.stderr[-4000:],file=sys.stderr)
+    raise SystemExit(p.returncode)
+rows=[]
+for line in p.stdout.splitlines():
+    line=line.strip()
+    if not line: continue
+    try: rows.append(json.loads(line))
+    except json.JSONDecodeError: continue
+if not rows:
+    raise SystemExit("x-cli returned no parseable timeline rows; refusing to overwrite archive.")
 
-def get_json(url):
-    req = urllib.request.Request(url, headers={"Authorization": "Bearer " + TOKEN, "User-Agent": "ShioriArchiveDailyImporter/1.0"})
-    try:
-        with urllib.request.urlopen(req, timeout=30) as r:
-            return json.load(r)
-    except Exception as e:
-        raise SystemExit(f"X API request failed: {e}")
+def find(d,*keys):
+    if not isinstance(d,dict): return None
+    for k in keys:
+        if d.get(k) not in (None,""): return d[k]
+    return None
 
-user = get_json("https://api.x.com/2/users/by/username/nagata_shiori_?user.fields=id,username")
-uid = user.get("data", {}).get("id")
-if not uid:
-    raise SystemExit("X API did not return the requested public user.")
+def normalise(r):
+    tid=str(find(r,"id","tweet_id","rest_id") or "")
+    text=find(r,"text","full_text","content")
+    created=find(r,"created_at","createdAt","date","timestamp")
+    if not tid or not re.fullmatch(r"\d{15,22}",tid) or not isinstance(text,str) or not text.strip() or not created:
+        return None
+    if isinstance(created,(int,float)):
+        dt=datetime.fromtimestamp(created,tz=timezone.utc)
+    else:
+        raw=str(created).replace("Z","+00:00")
+        try: dt=datetime.fromisoformat(raw)
+        except ValueError:
+            for fmt in ("%a %b %d %H:%M:%S %z %Y","%Y-%m-%d %H:%M:%S %z"):
+                try: dt=datetime.strptime(str(created),fmt); break
+                except ValueError: pass
+            else: return None
+        if dt.tzinfo is None: dt=dt.replace(tzinfo=timezone.utc)
+    local=dt.astimezone(ZoneInfo("Asia/Tokyo"))
+    if "retweeted_status" in r or r.get("is_retweet") is True: return None
+    return {"id":"x-"+tid,"date":local.date().isoformat(),"time":local.strftime("%H:%M"),"type":"X",
+      "title":text.strip().splitlines()[0][:70],"summary":"","excerpt":text.strip()[:1000],
+      "sourceName":"X @nagata_shiori_","sourceUrl":f"https://x.com/nagata_shiori_/status/{tid}",
+      "confidence":"公開タイムライン取得・投稿ID確認（非公式公開エンドポイント）",
+      "tags":["本人投稿"],"people":[]}
 
-cursor = json.loads(CURSOR.read_text("utf-8")) if CURSOR.exists() else {}
-params = {"max_results": "100", "tweet.fields": "created_at,lang,referenced_tweets,entities", "exclude": "retweets"}
-if cursor.get("since_id"):
-    params["since_id"] = str(cursor["since_id"])
-url = f"https://api.x.com/2/users/{uid}/tweets?{urllib.parse.urlencode(params)}"
-payload = get_json(url)
-posts = payload.get("data", [])
-posts.sort(key=lambda x: int(x["id"]))
-existing = json.loads(OUT.read_text("utf-8")) if OUT.exists() else {"schemaVersion":1,"updatedAt":datetime.now(timezone.utc).date().isoformat(),"notice":"本人Xの公開投稿。原文と個別投稿への導線を掲載。","events":[]}
-known = {e.get("id") for e in existing.get("events", [])}
-added = []
-for p in posts:
-    pid = str(p.get("id", ""))
-    text = (p.get("text") or "").strip()
-    created = p.get("created_at")
-    if not pid or not text or not created or "x-" + pid in known:
-        continue
-    dt = datetime.fromisoformat(created.replace("Z", "+00:00")).astimezone(timezone.utc)
-    local = dt.astimezone(__import__("zoneinfo").ZoneInfo("Asia/Tokyo"))
-    excerpt = text[:1000]
-    added.append({
-        "id": "x-" + pid, "date": local.date().isoformat(), "time": local.strftime("%H:%M"),
-        "type": "X", "title": text.splitlines()[0][:70],
-        "summary": "", "excerpt": excerpt,
-        "sourceName": "X @nagata_shiori_",
-        "sourceUrl": f"https://x.com/nagata_shiori_/status/{pid}",
-        "confidence": "X API v2本人アカウント投稿・投稿ID確認",
-        "tags": ["本人投稿"], "people": []
-    })
+incoming=[e for r in rows if (e:=normalise(r))]
+if not incoming:
+    raise SystemExit("Timeline was fetched but its JSON fields were not recognised; refusing to write.")
+data=json.loads(OUT.read_text("utf-8")) if OUT.exists() else {"schemaVersion":1,"updatedAt":"","notice":"本人Xの公開投稿。原文と個別投稿への導線を掲載。","events":[]}
+known={e.get("id") for e in data.get("events",[])}
+added=[e for e in incoming if e["id"] not in known]
 if added:
-    existing["events"].extend(added)
-    existing["events"].sort(key=lambda e:(e.get("date",""),e.get("time",""),e.get("id","")), reverse=True)
-    existing["updatedAt"] = datetime.now(timezone.utc).date().isoformat()
-    OUT.write_text(json.dumps(existing, ensure_ascii=False, indent=2) + "\n", "utf-8")
-    manifest = json.loads(MANIFEST.read_text("utf-8"))
-    if OUT.name not in manifest["files"]:
-        manifest["files"].append(OUT.name)
-    manifest["updatedAt"] = existing["updatedAt"]
-    MANIFEST.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", "utf-8")
-    print(f"Added {len(added)} X posts.")
-else:
-    print("No new X posts.")
-meta = payload.get("meta", {})
-new_since = max((str(p.get("id")) for p in posts if p.get("id")), key=int) if posts else cursor.get("since_id")
-if new_since:
-    CURSOR.write_text(json.dumps({"since_id": str(new_since), "user_id": str(uid), "updatedAt": datetime.now(timezone.utc).isoformat()}, ensure_ascii=False, indent=2) + "\n", "utf-8")
-print(f"Checked @{user['data'].get('username')}: fetched={len(posts)} added={len(added)}")
+    data["events"].extend(added)
+    data["events"].sort(key=lambda e:(e.get("date",""),e.get("time",""),e.get("id","")),reverse=True)
+    data["updatedAt"]=datetime.now(ZoneInfo("Asia/Tokyo")).date().isoformat()
+    OUT.write_text(json.dumps(data,ensure_ascii=False,indent=2)+"\n","utf-8")
+    manifest=json.loads(MANIFEST.read_text("utf-8"))
+    if OUT.name not in manifest["files"]: manifest["files"].append(OUT.name)
+    manifest["updatedAt"]=data["updatedAt"]
+    MANIFEST.write_text(json.dumps(manifest,ensure_ascii=False,indent=2)+"\n","utf-8")
+print(f"Fetched {len(rows)} rows; parsed {len(incoming)}; added {len(added)}.")
