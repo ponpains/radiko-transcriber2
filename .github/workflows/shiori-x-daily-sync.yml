@@ -1,4 +1,4 @@
-name: Daily Shiori X archive sync
+name: Daily Shiori X archive sync (free public timeline)
 on:
   schedule:
     - cron: "35 21 * * *"
@@ -11,18 +11,22 @@ concurrency:
 jobs:
   sync:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
         with:
           ref: shiori-archive-mvp
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-go@v5
         with:
-          python-version: "3.12"
+          go-version: "1.24"
+      - name: Install free read-only X client
+        run: go install github.com/tamnd/x-cli/cmd/x@latest
       - name: Import new public posts
-        env:
-          X_BEARER_TOKEN: ${{ secrets.X_BEARER_TOKEN }}
-        run: python3 shiori-archive/scripts/import_x_daily.py
+        run: |
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+          "$(go env GOPATH)/bin/x" timeline nagata_shiori_ -o jsonl -n 100 > /tmp/shiori-x.jsonl
+          test -s /tmp/shiori-x.jsonl
+          python3 shiori-archive/scripts/import_x_daily.py
       - name: Commit archive changes
         run: |
           if git diff --quiet; then
