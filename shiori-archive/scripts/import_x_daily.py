@@ -68,7 +68,7 @@ if added:
 else:
     print("No new X posts.")
 meta = payload.get("meta", {})
-new_since = meta.get("newest_id") or cursor.get("since_id")
+new_since = max((str(p.get("id")) for p in posts if p.get("id")), key=int) if posts else cursor.get("since_id")
 if new_since:
     CURSOR.write_text(json.dumps({"since_id": str(new_since), "user_id": str(uid), "updatedAt": datetime.now(timezone.utc).isoformat()}, ensure_ascii=False, indent=2) + "\n", "utf-8")
 print(f"Checked @{user['data'].get('username')}: fetched={len(posts)} added={len(added)}")
